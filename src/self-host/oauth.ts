@@ -142,8 +142,8 @@ export function resolveOAuthConfig(
   const resource = normalizeHttpsOrigin(resourceRaw, 'DC_OAUTH_RESOURCE');
 
   const adminPassword = env.DC_OAUTH_ADMIN_PASSWORD ?? '';
-  if (Buffer.byteLength(adminPassword, 'utf8') < 16) {
-    throw new Error('DC_OAUTH_ADMIN_PASSWORD must be at least 16 bytes long');
+  if (adminPassword.length === 0) {
+    throw new Error('DC_OAUTH_ADMIN_PASSWORD is required and must not be empty');
   }
 
   const allowedCimdHosts = parseCsvSet(

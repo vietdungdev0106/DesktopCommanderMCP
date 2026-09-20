@@ -115,7 +115,7 @@ Set these variables:
 ```bash
 export DC_AUTH_MODE=oauth
 export DC_OAUTH_ISSUER="https://mcp.example.com"
-export DC_OAUTH_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+export DC_OAUTH_ADMIN_PASSWORD='your-custom-password'
 
 npm run start:self-host
 ```
@@ -193,7 +193,7 @@ OAuth:
 export DC_AUTH_MODE=both
 export DC_MCP_TOKEN="$(openssl rand -hex 32)"
 export DC_OAUTH_ISSUER="https://mcp.example.com"
-export DC_OAUTH_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+export DC_OAUTH_ADMIN_PASSWORD='your-custom-password'
 
 npm run start:self-host
 ```
@@ -249,7 +249,7 @@ Cloudflare, so there is no reason to expose port 8765 on the LAN or router.
 | `DC_MCP_TOKEN` | required in bearer/both | Static Bearer token, minimum 32 bytes |
 | `DC_OAUTH_ISSUER` | required in oauth/both | Public HTTPS origin, e.g. `https://mcp.example.com` |
 | `DC_OAUTH_RESOURCE` | OAuth issuer | Canonical protected-resource HTTPS origin |
-| `DC_OAUTH_ADMIN_PASSWORD` | required in oauth/both | Password used on the self-hosted authorization page, minimum 16 bytes |
+| `DC_OAUTH_ADMIN_PASSWORD` | required in oauth/both | Password used on the self-hosted authorization page; any non-empty value is accepted. Use a strong password. |
 | `DC_OAUTH_ALLOWED_CIMD_HOSTS` | `chatgpt.com` | Comma-separated CIMD client host allow-list |
 | `DC_OAUTH_ALLOWED_REDIRECT_ORIGINS` | `https://chatgpt.com` | Comma-separated OAuth redirect origin allow-list |
 | `DC_OAUTH_STORE_PATH` | `~/.claude-server-commander/self-host-oauth.json` | Persistent client/token-hash store |
