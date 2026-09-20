@@ -18,6 +18,9 @@ const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FAILED_PASSWORD_ATTEMPTS = 10;
 const FAILED_PASSWORD_WINDOW_MS = 5 * 60 * 1000;
+const MAX_DYNAMIC_CLIENTS = 256;
+const MAX_REGISTRATIONS_PER_WINDOW = 20;
+const REGISTRATION_WINDOW_MS = 10 * 60 * 1000;
 
 type TokenRecord = {
   clientId: string;
@@ -305,6 +308,7 @@ export class SelfHostedOAuthServer {
   private pendingAuthorizations = new Map<string, PendingAuthorization>();
   private authorizationCodes = new Map<string, AuthorizationCode>();
   private failedPasswordAttempts: number[] = [];
+  private registrationAttempts: number[] = [];
   private persistChain: Promise<void> = Promise.resolve();
 
   constructor(readonly config: OAuthConfig) {}
@@ -775,6 +779,29 @@ export class SelfHostedOAuthServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    this.trimRegistrationAttempts();
+    if (this.registrationAttempts.length >= MAX_REGISTRATIONS_PER_WINDOW) {
+      oauthError(
+        res,
+        429,
+        'temporarily_unavailable',
+        'Too many dynamic client registrations; try again later',
+      );
+      return;
+    }
+
+    if (Object.keys(this.store.clients).length >= MAX_DYNAMIC_CLIENTS) {
+      oauthError(
+        res,
+        503,
+        'temporarily_unavailable',
+        'Dynamic client registration capacity reached',
+      );
+      return;
+    }
+
+    this.registrationAttempts.push(Date.now());
+
     let body: any;
     try {
       body = JSON.parse(await readBody(req));
@@ -1070,6 +1097,13 @@ ${error}
     );
   }
 
+  private trimRegistrationAttempts(): void {
+    const cutoff = Date.now() - REGISTRATION_WINDOW_MS;
+    this.registrationAttempts = this.registrationAttempts.filter(
+      (timestamp) => timestamp >= cutoff,
+    );
+  }
+
   private cleanupTransientState(): void {
     const now = Date.now();
     for (const [id, pending] of this.pendingAuthorizations) {
@@ -1101,14 +1135,18 @@ ${error}
   private persist(): Promise<void> {
     const snapshot = JSON.stringify(this.store, null, 2) + '\n';
     const target = this.config.storePath;
-    this.persistChain = this.persistChain.then(async () => {
-      const directory = path.dirname(target);
-      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-      const temp = `${target}.tmp-${process.pid}-${randomToken(6)}`;
-      await fs.writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 });
-      await fs.rename(temp, target);
-      await fs.chmod(target, 0o600);
-    });
+    // Recover the queue after a transient write failure so one failed persist
+    // does not permanently poison every later token refresh/registration.
+    this.persistChain = this.persistChain
+      .catch(() => undefined)
+      .then(async () => {
+        const directory = path.dirname(target);
+        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+        const temp = `${target}.tmp-${process.pid}-${randomToken(6)}`;
+        await fs.writeFile(temp, snapshot, { encoding: 'utf8', mode: 0o600 });
+        await fs.rename(temp, target);
+        await fs.chmod(target, 0o600);
+      });
     return this.persistChain;
   }
 }
