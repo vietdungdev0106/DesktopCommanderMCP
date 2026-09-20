@@ -62,10 +62,37 @@ function testSelfHostedEnvironment() {
   assert.equal(env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES, '1');
 }
 
+async function testRemoteFlagsStayOffline() {
+  const previous = process.env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES;
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+
+  process.env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES = '1';
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error('network should not be used in self-host mode');
+  };
+
+  try {
+    const { featureFlagManager } = await import('../dist/utils/feature-flags.js');
+    await featureFlagManager.initialize();
+    featureFlagManager.destroy();
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) {
+      delete process.env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES;
+    } else {
+      process.env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES = previous;
+    }
+  }
+}
+
 testBearerAuth();
 testTokenValidation();
 testLoopbackBinding();
 testPortValidation();
 testSelfHostedEnvironment();
+await testRemoteFlagsStayOffline();
 
 console.log('PASS self-host security helpers');
