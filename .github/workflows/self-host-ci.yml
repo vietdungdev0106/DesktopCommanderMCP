@@ -1,0 +1,51 @@
+name: Self-host CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/self-host/**'
+      - 'src/utils/feature-flags.ts'
+      - 'test/test-self-host-security.js'
+      - 'package.json'
+      - 'SELF_HOSTING.md'
+      - 'deploy/cloudflare/**'
+      - '.github/workflows/self-host-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/self-host/**'
+      - 'src/utils/feature-flags.ts'
+      - 'test/test-self-host-security.js'
+      - 'package.json'
+      - '.github/workflows/self-host-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+      DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1'
+      DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies without lifecycle network hooks
+        run: npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Self-host tests
+        run: node test/test-self-host-security.js
