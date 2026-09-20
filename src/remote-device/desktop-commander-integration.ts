@@ -9,6 +9,20 @@ import { captureRemote } from '../utils/capture.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 120_000;
+const MAX_TOOL_CALL_TIMEOUT_MS = 30 * 60_000;
+const TOOL_TIMEOUT_BUFFER_MS = 30_000;
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+    const raw = process.env[name]?.trim();
+    if (!raw) return fallback;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`${name} must be a positive integer`);
+    }
+    return value;
+}
+
 interface McpConfig {
     command: string;
     args: string[];
@@ -215,6 +229,30 @@ export class DesktopCommanderIntegration {
         return null;
     }
 
+    private resolveToolCallTimeoutMs(toolName: string, args: any): number {
+        const configured = parsePositiveIntEnv(
+            'DC_LOCAL_MCP_TOOL_TIMEOUT_MS',
+            DEFAULT_TOOL_CALL_TIMEOUT_MS
+        );
+
+        const requestedTimeout =
+            args && typeof args === 'object' && Number.isFinite(args.timeout_ms)
+                ? Number(args.timeout_ms)
+                : 0;
+
+        const processTools = new Set([
+            'start_process',
+            'read_process_output',
+            'interact_with_process',
+        ]);
+
+        const desired = processTools.has(toolName) && requestedTimeout > 0
+            ? Math.max(configured, requestedTimeout + TOOL_TIMEOUT_BUFFER_MS)
+            : configured;
+
+        return Math.min(desired, MAX_TOOL_CALL_TIMEOUT_MS);
+    }
+
     async callClientTool(toolName: string, args: any, metadata?: any) {
         // Restart the child if it died since the last call, so a one-off crash
         // costs one failed call instead of wedging the device until a human
@@ -223,13 +261,31 @@ export class DesktopCommanderIntegration {
 
         // Proxy other tools to MCP server
         try {
-            console.debug('[DEBUG] Calling MCP tool:', toolName, 'args:', JSON.stringify(args).substring(0, 100));
-            const result = await this.mcpClient!.callTool({
-                name: toolName,
-                arguments: args,
-                _meta: { remote: true, ...metadata || {} }
-            } as any);
-            console.debug('[DEBUG] Tool call successful:', toolName);
+            const timeoutMs = this.resolveToolCallTimeoutMs(toolName, args);
+            const startedAt = Date.now();
+            console.debug(
+                '[DEBUG] Calling MCP tool:',
+                toolName,
+                'timeoutMs:',
+                timeoutMs,
+                'args:',
+                JSON.stringify(args).substring(0, 100),
+            );
+            const result = await this.mcpClient!.callTool(
+                {
+                    name: toolName,
+                    arguments: args,
+                    _meta: { remote: true, ...metadata || {} }
+                } as any,
+                undefined,
+                { timeout: timeoutMs },
+            );
+            console.debug(
+                '[DEBUG] Tool call successful:',
+                toolName,
+                'durationMs:',
+                Date.now() - startedAt,
+            );
             return result;
         } catch (error) {
             console.error(`Error executing tool ${toolName}:`, error);
