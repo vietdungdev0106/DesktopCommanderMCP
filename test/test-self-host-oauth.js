@@ -186,7 +186,6 @@ try {
       grant_type: 'refresh_token',
       refresh_token: tokens.refresh_token,
       client_id: registration.client_id,
-      resource: issuer,
     }),
   });
   assert.equal(refreshResponse.status, 200);
@@ -203,7 +202,6 @@ try {
       grant_type: 'refresh_token',
       refresh_token: tokens.refresh_token,
       client_id: registration.client_id,
-      resource: issuer,
     }),
   });
   assert.equal(reusedRefresh.status, 400);
