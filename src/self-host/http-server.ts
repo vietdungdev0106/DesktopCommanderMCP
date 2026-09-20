@@ -29,6 +29,9 @@ import {
 type SessionContext = {
   server: Server;
   transport: StreamableHTTPServerTransport;
+  sessionId?: string;
+  lastActivityAt: number;
+  activeRequests: number;
   closing: boolean;
 };
 
@@ -46,6 +49,26 @@ const port = resolveListenPort();
 const sessions = new Map<string, SessionContext>();
 const desktop = new DesktopCommanderIntegration();
 let shuttingDown = false;
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+const sessionIdleMs = readPositiveIntEnv(
+  'DC_MCP_SESSION_IDLE_MS',
+  10 * 60 * 1000,
+);
+const maxSessions = readPositiveIntEnv('DC_MCP_MAX_SESSIONS', 32);
+const sessionSweepMs = Math.max(
+  5_000,
+  Math.min(60_000, Math.floor(sessionIdleMs / 2)),
+);
 
 function sendJson(
   res: http.ServerResponse,
@@ -147,22 +170,26 @@ async function createSessionContext(): Promise<SessionContext> {
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
     onsessioninitialized: (sessionId) => {
+      context.sessionId = sessionId;
+      context.lastActivityAt = Date.now();
       sessions.set(sessionId, context);
       console.error(
         `[self-host] MCP session initialized: ${sessionId} (active=${sessions.size})`,
       );
+      void enforceSessionLimit(sessionId);
     },
   });
 
   context = {
     server: mcpServer,
     transport,
+    lastActivityAt: Date.now(),
+    activeRequests: 0,
     closing: false,
   };
 
   transport.onclose = () => {
-    const sessionId = transport.sessionId;
-    void closeSession(context, sessionId);
+    void closeSession(context, context.sessionId, 'transport closed');
   };
 
   await mcpServer.connect(transport);
@@ -172,19 +199,75 @@ async function createSessionContext(): Promise<SessionContext> {
 async function closeSession(
   context: SessionContext,
   sessionId?: string,
+  reason = 'closed',
 ): Promise<void> {
   if (context.closing) return;
   context.closing = true;
 
-  if (sessionId) sessions.delete(sessionId);
+  const resolvedSessionId =
+    sessionId ?? context.sessionId ?? context.transport.sessionId;
+  if (resolvedSessionId) {
+    sessions.delete(resolvedSessionId);
+  }
 
   try {
     await context.server.close();
   } catch (error) {
     console.error('[self-host] Failed to close MCP server:', error);
+  } finally {
+    if (resolvedSessionId) {
+      console.error(
+        `[self-host] MCP session closed: ${resolvedSessionId} reason=${reason} (active=${sessions.size})`,
+      );
+    }
   }
-
 }
+
+async function enforceSessionLimit(excludeSessionId?: string): Promise<void> {
+  while (sessions.size > maxSessions) {
+    const candidates = [...sessions.entries()]
+      .filter(
+        ([sessionId, context]) =>
+          sessionId !== excludeSessionId &&
+          !context.closing &&
+          context.activeRequests === 0,
+      )
+      .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
+
+    const oldest = candidates[0];
+    if (!oldest) {
+      console.error(
+        `[self-host] Session cap exceeded (${sessions.size}/${maxSessions}) but all existing sessions are busy`,
+      );
+      return;
+    }
+
+    await closeSession(oldest[1], oldest[0], 'session cap eviction');
+  }
+}
+
+async function reapIdleSessions(): Promise<void> {
+  if (shuttingDown) return;
+
+  const now = Date.now();
+  const stale = [...sessions.entries()].filter(
+    ([, context]) =>
+      !context.closing &&
+      context.activeRequests === 0 &&
+      now - context.lastActivityAt >= sessionIdleMs,
+  );
+
+  await Promise.allSettled(
+    stale.map(([sessionId, context]) =>
+      closeSession(context, sessionId, 'idle timeout'),
+    ),
+  );
+}
+
+const sessionSweepTimer = setInterval(() => {
+  void reapIdleSessions();
+}, sessionSweepMs);
+sessionSweepTimer.unref?.();
 
 async function handleMcpRequest(
   req: http.IncomingMessage,
@@ -207,7 +290,22 @@ async function handleMcpRequest(
       return;
     }
 
-    await context.transport.handleRequest(req, res);
+    context.lastActivityAt = Date.now();
+
+    // GET is the long-lived server-to-client SSE stream. Do not count it as a
+    // busy tool request, otherwise an abandoned stream can keep a session alive
+    // forever. POST/DELETE are bounded protocol operations and protect the
+    // session from eviction while they are executing.
+    const countsAsActiveRequest = req.method !== 'GET';
+    if (countsAsActiveRequest) context.activeRequests += 1;
+    try {
+      await context.transport.handleRequest(req, res);
+    } finally {
+      if (countsAsActiveRequest) {
+        context.activeRequests = Math.max(0, context.activeRequests - 1);
+      }
+      context.lastActivityAt = Date.now();
+    }
     return;
   }
 
@@ -222,17 +320,25 @@ async function handleMcpRequest(
   }
 
   const context = await createSessionContext();
+  context.activeRequests += 1;
   try {
     await context.transport.handleRequest(req, res);
 
     // Invalid/non-initialize POSTs do not create a session. Avoid leaving a
-    // local Desktop Commander child alive in that case.
-    if (!context.transport.sessionId) {
-      await closeSession(context);
+    // local MCP server context alive in that case.
+    if (!context.sessionId && !context.transport.sessionId) {
+      await closeSession(context, undefined, 'invalid initialize request');
     }
   } catch (error) {
-    await closeSession(context, context.transport.sessionId);
+    await closeSession(
+      context,
+      context.sessionId ?? context.transport.sessionId,
+      'request error',
+    );
     throw error;
+  } finally {
+    context.activeRequests = Math.max(0, context.activeRequests - 1);
+    context.lastActivityAt = Date.now();
   }
 }
 
@@ -248,6 +354,9 @@ const httpServer = http.createServer(async (req, res) => {
         transport: 'streamable-http',
         authMode,
         oauthIssuer: oauth?.config.issuer,
+        activeSessions: sessions.size,
+        maxSessions,
+        sessionIdleMs,
         vendorRemoteServices: false,
       });
       return;
@@ -281,6 +390,7 @@ httpServer.requestTimeout = 0;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(sessionSweepTimer);
   console.error(`[self-host] ${signal} received; shutting down...`);
 
   // Stop accepting new requests first, then close MCP transports so any
@@ -330,6 +440,9 @@ async function start(): Promise<void> {
     console.error(`[self-host] Local endpoint: http://${host}:${port}/mcp`);
     console.error(`[self-host] Health: http://${host}:${port}/health`);
     console.error(`[self-host] Authentication mode: ${authMode}`);
+    console.error(
+      `[self-host] Session policy: max=${maxSessions}, idle=${sessionIdleMs}ms`,
+    );
     if (oauth) {
       console.error(`[self-host] OAuth issuer: ${oauth.config.issuer}`);
       console.error(`[self-host] OAuth resource: ${oauth.config.resource}`);
