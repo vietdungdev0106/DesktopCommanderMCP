@@ -3,6 +3,7 @@ import {
   applySelfHostedEnvironment,
   isBearerAuthorized,
   requireBearerToken,
+  resolveAuthMode,
   resolveListenHost,
   resolveListenPort,
 } from '../dist/self-host/security.js';
@@ -25,6 +26,16 @@ function testTokenValidation() {
   assert.throws(
     () => requireBearerToken({ DC_MCP_TOKEN: 'too-short' }),
     /at least 32 bytes/,
+  );
+}
+
+function testAuthMode() {
+  assert.equal(resolveAuthMode({}), 'bearer');
+  assert.equal(resolveAuthMode({ DC_AUTH_MODE: 'oauth' }), 'oauth');
+  assert.equal(resolveAuthMode({ DC_AUTH_MODE: 'both' }), 'both');
+  assert.throws(
+    () => resolveAuthMode({ DC_AUTH_MODE: 'invalid' }),
+    /bearer, oauth, both/,
   );
 }
 
@@ -90,6 +101,7 @@ async function testRemoteFlagsStayOffline() {
 
 testBearerAuth();
 testTokenValidation();
+testAuthMode();
 testLoopbackBinding();
 testPortValidation();
 testSelfHostedEnvironment();
