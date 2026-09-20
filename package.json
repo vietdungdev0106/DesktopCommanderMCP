@@ -66,7 +66,7 @@
     "count-tokens:json": "npm run build && node scripts/count-tokens.js --json",
     "start:self-host": "node dist/self-host/http-server.js",
     "dev:self-host": "tsx src/self-host/http-server.ts",
-    "test:self-host": "npm run build && node test/test-self-host-security.js"
+    "test:self-host": "npm run build && node test/test-self-host-security.js && node test/test-self-host-oauth.js"
   },
   "publishConfig": {
     "access": "public"
