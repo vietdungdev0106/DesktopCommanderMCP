@@ -9,6 +9,12 @@ interface FeatureFlags {
   flags?: Record<string, any>;
 }
 
+function remoteServicesDisabled(): boolean {
+  const raw = process.env.DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES;
+  if (!raw) return false;
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
 class FeatureFlagManager {
   private flags: Record<string, any> = {};
   private lastFetch: number = 0;
@@ -41,6 +47,17 @@ class FeatureFlagManager {
    */
   async initialize(): Promise<void> {
     try {
+      // Self-hosted mode must not contact Desktop Commander-hosted services.
+      // Do not load cached remote flags either: self-hosted behavior should be
+      // deterministic and independent from vendor-controlled configuration.
+      if (remoteServicesDisabled()) {
+        this.flags = {};
+        this.loadedFromCache = false;
+        this.resolveFreshFetch?.();
+        logger.info('Remote feature flags disabled (self-hosted mode)');
+        return;
+      }
+
       // Load from cache immediately (non-blocking)
       await this.loadFromCache();
       
