@@ -193,6 +193,10 @@ try {
 
   const authorizeResponse = await fetch(authorizeUrl);
   assert.equal(authorizeResponse.status, 200);
+  assert.match(
+    authorizeResponse.headers.get('content-security-policy') ?? '',
+    /form-action 'self' https:\/\/chatgpt\.com/,
+  );
   const authorizeHtml = await authorizeResponse.text();
   const requestId = authorizeHtml.match(
     /name="request_id" value="([A-Za-z0-9_-]+)"/,
@@ -224,7 +228,7 @@ try {
     }),
     redirect: 'manual',
   });
-  assert.equal(approveResponse.status, 302);
+  assert.equal(approveResponse.status, 303);
 
   const duplicateApproveResponse = await fetch(`${localBase}/authorize`, {
     method: 'POST',
