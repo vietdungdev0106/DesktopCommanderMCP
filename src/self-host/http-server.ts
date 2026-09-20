@@ -232,7 +232,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.error(`[self-host] ${signal} received; shutting down...`);
 
-  await new Promise<void>((resolve) => {
+  // Stop accepting new requests first, then close MCP transports so any
+  // long-lived SSE responses can drain. Waiting for server.close() before
+  // closing sessions would deadlock on those open streams.
+  const httpClosed = new Promise<void>((resolve) => {
     httpServer.close(() => resolve());
   });
 
@@ -247,6 +250,14 @@ async function shutdown(signal: string): Promise<void> {
   } catch (error) {
     console.error('[self-host] Failed to close Desktop Commander child:', error);
   }
+
+  // Node 18+ exposes closeAllConnections(). Use it as a final safety net for
+  // non-MCP keep-alive sockets after graceful transport shutdown.
+  httpServer.closeAllConnections?.();
+  await Promise.race([
+    httpClosed,
+    new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+  ]);
 }
 
 process.once('SIGINT', () => {
