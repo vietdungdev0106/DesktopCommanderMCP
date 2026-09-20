@@ -177,12 +177,17 @@ OAuth registrations and token hashes are persisted by default at:
 ~/.claude-server-commander/self-host-oauth.json
 ```
 
-Raw access tokens, raw refresh tokens, and `DC_OAUTH_ADMIN_PASSWORD` are not
-written to that file. The file is created with owner-only permissions.
+Raw access tokens, raw refresh tokens, raw authorization request IDs, raw
+authorization codes, and `DC_OAUTH_ADMIN_PASSWORD` are not written to that
+file. The file is created with owner-only permissions.
 
-Authorization requests and authorization codes are deliberately kept only in
-memory and expire quickly. If the process restarts in the middle of an OAuth
-browser flow, restart the connection from ChatGPT.
+Short-lived authorization request state and authorization-code state are
+persisted using SHA-256 hashes for their bearer identifiers. This allows an
+OAuth browser flow to continue after the self-host server restarts, provided
+the original request/code has not reached its normal expiry time. Pending
+authorization requests expire after 10 minutes and authorization codes expire
+after 5 minutes. Expired transient state is removed during initialization and
+normal OAuth activity.
 
 ### Hybrid migration mode
 
