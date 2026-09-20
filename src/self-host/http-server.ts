@@ -100,6 +100,20 @@ function authorize(req: http.IncomingMessage, res: http.ServerResponse): boolean
   return false;
 }
 
+function addOAuthSecurityMetadata(tool: any): any {
+  const securitySchemes = [{ type: 'oauth2', scopes: ['mcp:tools'] }];
+  return {
+    ...tool,
+    securitySchemes,
+    _meta: {
+      ...(tool?._meta ?? {}),
+      // Mirror the top-level field for ChatGPT clients that still read auth
+      // metadata from _meta for backwards compatibility.
+      securitySchemes,
+    },
+  };
+}
+
 async function createSessionContext(): Promise<SessionContext> {
   const mcpServer = new Server(
     {
@@ -114,7 +128,13 @@ async function createSessionContext(): Promise<SessionContext> {
   );
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    return await desktop.listClientTools();
+    const result = await desktop.listClientTools();
+    if (!oauth) return result;
+
+    return {
+      ...result,
+      tools: (result.tools ?? []).map(addOAuthSecurityMetadata),
+    } as any;
   });
 
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
