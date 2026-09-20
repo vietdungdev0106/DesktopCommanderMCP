@@ -24,7 +24,6 @@ import {
 type SessionContext = {
   server: Server;
   transport: StreamableHTTPServerTransport;
-  desktop: DesktopCommanderIntegration;
   closing: boolean;
 };
 
@@ -34,6 +33,7 @@ const bearerToken = requireBearerToken();
 const host = resolveListenHost();
 const port = resolveListenPort();
 const sessions = new Map<string, SessionContext>();
+const desktop = new DesktopCommanderIntegration();
 let shuttingDown = false;
 
 function sendJson(
@@ -77,9 +77,6 @@ function authorize(req: http.IncomingMessage, res: http.ServerResponse): boolean
 }
 
 async function createSessionContext(): Promise<SessionContext> {
-  const desktop = new DesktopCommanderIntegration();
-  await desktop.initialize();
-
   const mcpServer = new Server(
     {
       name: 'desktop-commander-self-hosted',
@@ -116,7 +113,6 @@ async function createSessionContext(): Promise<SessionContext> {
   context = {
     server: mcpServer,
     transport,
-    desktop,
     closing: false,
   };
 
@@ -144,11 +140,6 @@ async function closeSession(
     console.error('[self-host] Failed to close MCP server:', error);
   }
 
-  try {
-    await context.desktop.shutdown();
-  } catch (error) {
-    console.error('[self-host] Failed to close Desktop Commander child:', error);
-  }
 }
 
 async function handleMcpRequest(
@@ -250,6 +241,12 @@ async function shutdown(signal: string): Promise<void> {
   await Promise.allSettled(
     [...uniqueContexts].map((context) => closeSession(context)),
   );
+
+  try {
+    await desktop.shutdown();
+  } catch (error) {
+    console.error('[self-host] Failed to close Desktop Commander child:', error);
+  }
 }
 
 process.once('SIGINT', () => {
@@ -259,9 +256,26 @@ process.once('SIGTERM', () => {
   void shutdown('SIGTERM').finally(() => process.exit(0));
 });
 
-httpServer.listen(port, host, () => {
-  console.error('[self-host] Desktop Commander MCP is ready');
-  console.error(`[self-host] Local endpoint: http://${host}:${port}/mcp`);
-  console.error(`[self-host] Health: http://${host}:${port}/health`);
-  console.error('[self-host] Vendor Remote MCP, telemetry and remote feature flags are disabled');
+async function start(): Promise<void> {
+  // One local stdio child is shared by all remote HTTP sessions. This avoids a
+  // new Desktop Commander process for every reconnect while preserving MCP
+  // protocol state in a lightweight Server/transport pair per remote session.
+  await desktop.initialize();
+
+  httpServer.listen(port, host, () => {
+    console.error('[self-host] Desktop Commander MCP is ready');
+    console.error(`[self-host] Local endpoint: http://${host}:${port}/mcp`);
+    console.error(`[self-host] Health: http://${host}:${port}/health`);
+    console.error('[self-host] Vendor Remote MCP, telemetry and remote feature flags are disabled');
+  });
+}
+
+start().catch(async (error) => {
+  console.error('[self-host] Startup failed:', error);
+  try {
+    await desktop.shutdown();
+  } catch {
+    // Best effort after failed initialization.
+  }
+  process.exit(1);
 });
