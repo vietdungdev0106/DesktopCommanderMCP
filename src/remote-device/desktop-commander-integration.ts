@@ -10,7 +10,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_TOOL_CALL_TIMEOUT_MS = 120_000;
-const MAX_TOOL_CALL_TIMEOUT_MS = 10 * 60_000;
+const MAX_TOOL_CALL_TIMEOUT_MS = 30 * 60_000;
 const TOOL_TIMEOUT_BUFFER_MS = 30_000;
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
