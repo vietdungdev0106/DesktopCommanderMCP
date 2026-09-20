@@ -281,14 +281,16 @@ function sendHtml(
   res: http.ServerResponse,
   statusCode: number,
   body: string,
+  formActionOrigins: Iterable<string> = [],
 ): void {
+  const formAction = ["'self'", ...formActionOrigins].join(' ');
   res.writeHead(statusCode, {
     'content-type': 'text/html; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
     pragma: 'no-cache',
     'content-security-policy':
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; base-uri 'none'; frame-ancestors 'none'`,
     'x-frame-options': 'DENY',
     'referrer-policy': 'no-referrer',
   });
@@ -331,6 +333,19 @@ export class SelfHostedOAuthServer {
     return (
       `Bearer resource_metadata="${this.protectedResourceMetadataUrl}", ` +
       `scope="${OAUTH_TOOL_SCOPE}"`
+    );
+  }
+
+  private sendAuthorizationHtml(
+    res: http.ServerResponse,
+    statusCode: number,
+    body: string,
+  ): void {
+    sendHtml(
+      res,
+      statusCode,
+      body,
+      this.config.allowedRedirectOrigins,
     );
   }
 
@@ -487,7 +502,7 @@ export class SelfHostedOAuthServer {
     try {
       client = await this.validateClient(clientId, redirectUri);
     } catch (error) {
-      sendHtml(
+      this.sendAuthorizationHtml(
         res,
         400,
         this.renderErrorPage(
@@ -556,7 +571,7 @@ export class SelfHostedOAuthServer {
     this.store.pendingAuthorizations[hashToken(id)] = storedPending;
     await this.persist();
 
-    sendHtml(res, 200, this.renderLoginPage(pending));
+    this.sendAuthorizationHtml(res, 200, this.renderLoginPage(pending));
   }
 
   private async handleAuthorizePost(
@@ -567,7 +582,7 @@ export class SelfHostedOAuthServer {
     try {
       form = new URLSearchParams(await readBody(req));
     } catch (error) {
-      sendHtml(
+      this.sendAuthorizationHtml(
         res,
         400,
         this.renderErrorPage(
@@ -588,7 +603,7 @@ export class SelfHostedOAuthServer {
         console.error(
           `[self-host][oauth] Duplicate authorize submit ignored request=${requestTrace}; authorization already completed`,
         );
-        sendHtml(
+        this.sendAuthorizationHtml(
           res,
           200,
           this.renderErrorPage(
@@ -613,7 +628,7 @@ export class SelfHostedOAuthServer {
       console.error(
         `[self-host][oauth] Authorization request missing or expired request=${requestTrace}`,
       );
-      sendHtml(
+      this.sendAuthorizationHtml(
         res,
         400,
         this.renderErrorPage(
@@ -630,7 +645,7 @@ export class SelfHostedOAuthServer {
 
     this.trimFailedPasswordAttempts();
     if (this.failedPasswordAttempts.length >= MAX_FAILED_PASSWORD_ATTEMPTS) {
-      sendHtml(
+      this.sendAuthorizationHtml(
         res,
         429,
         this.renderLoginPage(
@@ -644,7 +659,7 @@ export class SelfHostedOAuthServer {
     const password = form.get('password') ?? '';
     if (!constantTimeTextEqual(password, this.config.adminPassword)) {
       this.failedPasswordAttempts.push(Date.now());
-      sendHtml(
+      this.sendAuthorizationHtml(
         res,
         401,
         this.renderLoginPage(pending, 'Incorrect authorization password.'),
@@ -680,7 +695,7 @@ export class SelfHostedOAuthServer {
     if (pending.state) target.searchParams.set('state', pending.state);
     target.searchParams.set('iss', this.config.issuer);
 
-    res.writeHead(302, {
+    res.writeHead(303, {
       location: target.toString(),
       'cache-control': 'no-store',
       pragma: 'no-cache',
