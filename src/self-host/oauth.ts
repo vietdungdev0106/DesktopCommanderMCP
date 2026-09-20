@@ -693,7 +693,12 @@ export class SelfHostedOAuthServer {
     }
 
     const clientId = form.get('client_id') ?? '';
-    const resource = form.get('resource') ?? '';
+    // RFC 8707 permits a resource parameter, but refresh requests from OAuth
+    // clients are not guaranteed to repeat it. Keep the token audience pinned
+    // to the resource from the original grant; when a resource is supplied it
+    // must match exactly.
+    const requestedResource = form.get('resource');
+    const resource = requestedResource || record.resource;
     if (
       clientId !== record.clientId ||
       resource !== record.resource ||
@@ -913,16 +918,17 @@ export class SelfHostedOAuthServer {
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
-    let response: Response;
-    try {
-      response = await fetch(metadataUrl, {
-        headers: { accept: 'application/json' },
-        redirect: 'error',
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    const response = await (async () => {
+      try {
+        return await fetch(metadataUrl, {
+          headers: { accept: 'application/json' },
+          redirect: 'error',
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
 
     if (!response.ok) {
       throw new Error(`Unable to fetch CIMD metadata (HTTP ${response.status})`);
