@@ -6,7 +6,7 @@ on:
     paths:
       - 'src/self-host/**'
       - 'src/utils/feature-flags.ts'
-      - 'test/test-self-host-security.js'
+      - 'test/test-self-host-*.js'
       - 'package.json'
       - 'SELF_HOSTING.md'
       - 'deploy/cloudflare/**'
@@ -16,7 +16,7 @@ on:
     paths:
       - 'src/self-host/**'
       - 'src/utils/feature-flags.ts'
-      - 'test/test-self-host-security.js'
+      - 'test/test-self-host-*.js'
       - 'package.json'
       - '.github/workflows/self-host-ci.yml'
 
@@ -48,4 +48,6 @@ jobs:
         run: npm run build
 
       - name: Self-host tests
-        run: node test/test-self-host-security.js
+        run: |
+          node test/test-self-host-security.js
+          node test/test-self-host-oauth.js

@@ -1,5 +1,17 @@
 import { timingSafeEqual } from 'node:crypto';
 
+export type SelfHostAuthMode = 'bearer' | 'oauth' | 'both';
+
+export function resolveAuthMode(
+  env: NodeJS.ProcessEnv = process.env,
+): SelfHostAuthMode {
+  const raw = (env.DC_AUTH_MODE ?? 'bearer').trim().toLowerCase();
+  if (raw === 'bearer' || raw === 'oauth' || raw === 'both') {
+    return raw;
+  }
+  throw new Error('DC_AUTH_MODE must be one of: bearer, oauth, both');
+}
+
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 

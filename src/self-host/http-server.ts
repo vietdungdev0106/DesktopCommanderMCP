@@ -17,9 +17,14 @@ import {
   applySelfHostedEnvironment,
   isBearerAuthorized,
   requireBearerToken,
+  resolveAuthMode,
   resolveListenHost,
   resolveListenPort,
 } from './security.js';
+import {
+  SelfHostedOAuthServer,
+  resolveOAuthConfig,
+} from './oauth.js';
 
 type SessionContext = {
   server: Server;
@@ -29,7 +34,13 @@ type SessionContext = {
 
 applySelfHostedEnvironment();
 
-const bearerToken = requireBearerToken();
+const authMode = resolveAuthMode();
+const bearerToken =
+  authMode === 'bearer' || authMode === 'both' ? requireBearerToken() : null;
+const oauth =
+  authMode === 'oauth' || authMode === 'both'
+    ? new SelfHostedOAuthServer(resolveOAuthConfig())
+    : null;
 const host = resolveListenHost();
 const port = resolveListenPort();
 const sessions = new Map<string, SessionContext>();
@@ -69,11 +80,38 @@ function sendMcpError(
 }
 
 function authorize(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-  if (isBearerAuthorized(req.headers.authorization, bearerToken)) return true;
+  if (
+    bearerToken &&
+    isBearerAuthorized(req.headers.authorization, bearerToken)
+  ) {
+    return true;
+  }
 
-  res.setHeader('www-authenticate', 'Bearer realm="desktop-commander-mcp"');
+  if (oauth?.authenticateBearer(req.headers.authorization)) {
+    return true;
+  }
+
+  if (oauth) {
+    res.setHeader('www-authenticate', oauth.challengeHeader());
+  } else {
+    res.setHeader('www-authenticate', 'Bearer realm="desktop-commander-mcp"');
+  }
   sendMcpError(res, 401, -32001, 'Unauthorized');
   return false;
+}
+
+function addOAuthSecurityMetadata(tool: any): any {
+  const securitySchemes = [{ type: 'oauth2', scopes: ['mcp:tools'] }];
+  return {
+    ...tool,
+    securitySchemes,
+    _meta: {
+      ...(tool?._meta ?? {}),
+      // Mirror the top-level field for ChatGPT clients that still read auth
+      // metadata from _meta for backwards compatibility.
+      securitySchemes,
+    },
+  };
 }
 
 async function createSessionContext(): Promise<SessionContext> {
@@ -90,7 +128,13 @@ async function createSessionContext(): Promise<SessionContext> {
   );
 
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    return await desktop.listClientTools();
+    const result = await desktop.listClientTools();
+    if (!oauth) return result;
+
+    return {
+      ...result,
+      tools: (result.tools ?? []).map(addOAuthSecurityMetadata),
+    } as any;
   });
 
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -202,8 +246,15 @@ const httpServer = http.createServer(async (req, res) => {
         service: 'desktop-commander-self-hosted',
         version: VERSION,
         transport: 'streamable-http',
+        authMode,
+        oauthIssuer: oauth?.config.issuer,
         vendorRemoteServices: false,
       });
+      return;
+    }
+
+    if (oauth?.canHandle(url.pathname)) {
+      await oauth.handleHttp(req, res, url);
       return;
     }
 
@@ -271,12 +322,18 @@ async function start(): Promise<void> {
   // One local stdio child is shared by all remote HTTP sessions. This avoids a
   // new Desktop Commander process for every reconnect while preserving MCP
   // protocol state in a lightweight Server/transport pair per remote session.
+  await oauth?.initialize();
   await desktop.initialize();
 
   httpServer.listen(port, host, () => {
     console.error('[self-host] Desktop Commander MCP is ready');
     console.error(`[self-host] Local endpoint: http://${host}:${port}/mcp`);
     console.error(`[self-host] Health: http://${host}:${port}/health`);
+    console.error(`[self-host] Authentication mode: ${authMode}`);
+    if (oauth) {
+      console.error(`[self-host] OAuth issuer: ${oauth.config.issuer}`);
+      console.error(`[self-host] OAuth resource: ${oauth.config.resource}`);
+    }
     console.error('[self-host] Vendor Remote MCP, telemetry and remote feature flags are disabled');
   });
 }
