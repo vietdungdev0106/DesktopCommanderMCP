@@ -29,7 +29,8 @@ access.
 The self-hosted server therefore:
 
 - binds to `127.0.0.1` by default;
-- requires a Bearer token on every `/mcp` request;
+- supports static Bearer auth, OAuth 2.1 + PKCE, or both;
+- requires authentication on every `/mcp` request;
 - refuses non-loopback binds unless explicitly overridden;
 - forces Desktop Commander telemetry off;
 - disables vendor-hosted remote feature flags;
@@ -99,6 +100,107 @@ curl -i \
 A GET without an MCP session is expected to return an MCP error. Use an MCP
 client/Inspector for a full protocol test.
 
+## ChatGPT Web: OAuth 2.1 + PKCE
+
+For ChatGPT Web, use OAuth mode instead of sharing a static MCP bearer token.
+The server implements the MCP authorization discovery contract, Authorization
+Code flow with PKCE S256, RFC 9207 issuer identification, CIMD, DCR, access
+tokens, and rotating refresh tokens.
+
+Your Cloudflare hostname must already point at the local server before starting
+the ChatGPT connection.
+
+Set these variables:
+
+```bash
+export DC_AUTH_MODE=oauth
+export DC_OAUTH_ISSUER="https://mcp.example.com"
+export DC_OAUTH_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+
+npm run start:self-host
+```
+
+In OAuth mode, `DC_MCP_TOKEN` is not required.
+
+The public endpoints are:
+
+```text
+https://mcp.example.com/mcp
+https://mcp.example.com/.well-known/oauth-protected-resource
+https://mcp.example.com/.well-known/oauth-authorization-server
+https://mcp.example.com/authorize
+https://mcp.example.com/token
+https://mcp.example.com/register
+```
+
+The protected-resource document advertises the exact canonical OAuth resource,
+and the authorization server metadata advertises:
+
+- Authorization Code and refresh-token grants
+- PKCE `S256`
+- token endpoint auth method `none` for public clients
+- Client ID Metadata Documents (CIMD)
+- Dynamic Client Registration (DCR)
+- RFC 9207 `iss` authorization-response identification
+
+By default, CIMD client IDs are accepted only from `chatgpt.com`, and redirect
+URIs are accepted only on the `https://chatgpt.com` origin. This makes the
+default OAuth configuration intentionally ChatGPT-specific rather than a
+general-purpose public authorization server.
+
+### Connect from ChatGPT
+
+Use this MCP endpoint when creating the custom app/server:
+
+```text
+https://mcp.example.com/mcp
+```
+
+Choose OAuth authentication if the UI asks for the authentication mechanism.
+ChatGPT discovers the OAuth endpoints automatically from the well-known
+metadata.
+
+During the first connection, the browser opens the self-hosted authorization
+page. Enter the value of `DC_OAUTH_ADMIN_PASSWORD`. This is a password for
+your Desktop Commander authorization server; it is **not** your ChatGPT
+password.
+
+After approval, ChatGPT exchanges the authorization code using PKCE and stores
+the resulting connection tokens. Access tokens default to one hour. Refresh
+tokens default to 30 days and rotate on every successful refresh.
+
+### OAuth state persistence
+
+OAuth registrations and token hashes are persisted by default at:
+
+```text
+~/.claude-server-commander/self-host-oauth.json
+```
+
+Raw access tokens, raw refresh tokens, and `DC_OAUTH_ADMIN_PASSWORD` are not
+written to that file. The file is created with owner-only permissions.
+
+Authorization requests and authorization codes are deliberately kept only in
+memory and expire quickly. If the process restarts in the middle of an OAuth
+browser flow, restart the connection from ChatGPT.
+
+### Hybrid migration mode
+
+If you still have a client using the old static token while moving ChatGPT to
+OAuth:
+
+```bash
+export DC_AUTH_MODE=both
+export DC_MCP_TOKEN="$(openssl rand -hex 32)"
+export DC_OAUTH_ISSUER="https://mcp.example.com"
+export DC_OAUTH_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+
+npm run start:self-host
+```
+
+In `both` mode, `/mcp` accepts either the static `DC_MCP_TOKEN` or a valid
+OAuth access token. OAuth discovery is still published for ChatGPT.
+
 ## Cloudflare Tunnel
 
 Install cloudflared on macOS:
@@ -143,7 +245,16 @@ Cloudflare, so there is no reason to expose port 8765 on the LAN or router.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DC_MCP_TOKEN` | required | Bearer token, minimum 32 bytes |
+| `DC_AUTH_MODE` | `bearer` | `bearer`, `oauth`, or `both` |
+| `DC_MCP_TOKEN` | required in bearer/both | Static Bearer token, minimum 32 bytes |
+| `DC_OAUTH_ISSUER` | required in oauth/both | Public HTTPS origin, e.g. `https://mcp.example.com` |
+| `DC_OAUTH_RESOURCE` | OAuth issuer | Canonical protected-resource HTTPS origin |
+| `DC_OAUTH_ADMIN_PASSWORD` | required in oauth/both | Password used on the self-hosted authorization page, minimum 16 bytes |
+| `DC_OAUTH_ALLOWED_CIMD_HOSTS` | `chatgpt.com` | Comma-separated CIMD client host allow-list |
+| `DC_OAUTH_ALLOWED_REDIRECT_ORIGINS` | `https://chatgpt.com` | Comma-separated OAuth redirect origin allow-list |
+| `DC_OAUTH_STORE_PATH` | `~/.claude-server-commander/self-host-oauth.json` | Persistent client/token-hash store |
+| `DC_OAUTH_ACCESS_TTL_SECONDS` | `3600` | Access-token lifetime |
+| `DC_OAUTH_REFRESH_TTL_SECONDS` | `2592000` | Refresh-token lifetime |
 | `DC_MCP_HOST` | `127.0.0.1` | Local listen host |
 | `DC_MCP_PORT` | `8765` | Local listen port |
 | `DC_MCP_ALLOW_NON_LOOPBACK` | false | Explicitly permit a non-loopback bind |
@@ -167,11 +278,14 @@ Run directly from TypeScript:
 DC_MCP_TOKEN="$(openssl rand -hex 32)" npm run dev:self-host
 ```
 
-Run the focused self-host security tests:
+Run the focused self-host security and OAuth integration tests:
 
 ```bash
 npm run test:self-host
 ```
+
+The OAuth integration test performs a complete local DCR → authorization →
+PKCE token exchange → refresh-token rotation flow without contacting ChatGPT.
 
 The normal stdio entrypoint remains unchanged, so upstream/local clients can
 still use:
