@@ -78,6 +78,58 @@ try {
   assert.deepEqual(authMetadata.code_challenge_methods_supported, ['S256']);
   assert.deepEqual(authMetadata.token_endpoint_auth_methods_supported, ['none']);
   assert.equal(authMetadata.client_id_metadata_document_supported, true);
+  assert.match(
+    oauth.challengeHeader(),
+    /resource_metadata="https:\/\/mcp\.example\.test\/\.well-known\/oauth-protected-resource"/,
+  );
+  assert.match(oauth.challengeHeader(), /scope="mcp:tools"/);
+
+  // ChatGPT currently publishes both the plural list and a legacy singular
+  // preference for private_key_jwt. This server advertises only public-client
+  // auth ("none"), so CIMD validation must select the common method from the
+  // plural list instead of rejecting the singular preference.
+  const originalFetch = globalThis.fetch;
+  const cimdClientId = 'https://chatgpt.com/oauth/client.json';
+  globalThis.fetch = async (input, init) => {
+    const target = String(input);
+    if (target === cimdClientId) {
+      return new Response(
+        JSON.stringify({
+          client_id: cimdClientId,
+          client_name: 'ChatGPT',
+          redirect_uris: [redirectUri],
+          token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+          token_endpoint_auth_method: 'private_key_jwt',
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const cimdAuthorizeUrl = new URL(`${localBase}/authorize`);
+    cimdAuthorizeUrl.searchParams.set('response_type', 'code');
+    cimdAuthorizeUrl.searchParams.set('client_id', cimdClientId);
+    cimdAuthorizeUrl.searchParams.set('redirect_uri', redirectUri);
+    cimdAuthorizeUrl.searchParams.set('scope', 'mcp:tools offline_access');
+    cimdAuthorizeUrl.searchParams.set('state', 'cimd-state');
+    cimdAuthorizeUrl.searchParams.set('resource', issuer);
+    cimdAuthorizeUrl.searchParams.set(
+      'code_challenge',
+      pkceS256('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~'),
+    );
+    cimdAuthorizeUrl.searchParams.set('code_challenge_method', 'S256');
+
+    const cimdAuthorizeResponse = await originalFetch(cimdAuthorizeUrl);
+    assert.equal(cimdAuthorizeResponse.status, 200);
+    assert.match(await cimdAuthorizeResponse.text(), /Authorize Desktop Commander/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 
   const badRegistration = await fetch(`${localBase}/register`, {
     method: 'POST',
