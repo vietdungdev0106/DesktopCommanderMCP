@@ -36,11 +36,15 @@ type RegisteredClient = {
   createdAt: number;
 };
 
+type StoredPendingAuthorization = Omit<PendingAuthorization, 'id'>;
+
 type OAuthStore = {
   version: 1;
   clients: Record<string, RegisteredClient>;
   accessTokens: Record<string, TokenRecord>;
   refreshTokens: Record<string, TokenRecord>;
+  pendingAuthorizations: Record<string, StoredPendingAuthorization>;
+  authorizationCodes: Record<string, AuthorizationCode>;
 };
 
 type ClientValidation = {
@@ -188,6 +192,8 @@ function emptyStore(): OAuthStore {
     clients: {},
     accessTokens: {},
     refreshTokens: {},
+    pendingAuthorizations: {},
+    authorizationCodes: {},
   };
 }
 
@@ -305,8 +311,6 @@ function isValidPkceVerifier(value: string): boolean {
 
 export class SelfHostedOAuthServer {
   private store: OAuthStore = emptyStore();
-  private pendingAuthorizations = new Map<string, PendingAuthorization>();
-  private authorizationCodes = new Map<string, AuthorizationCode>();
   private failedPasswordAttempts: number[] = [];
   private registrationAttempts: number[] = [];
   private persistChain: Promise<void> = Promise.resolve();
@@ -336,13 +340,30 @@ export class SelfHostedOAuthServer {
       ) {
         throw new Error('Unsupported or invalid OAuth store format');
       }
-      this.store = parsed as OAuthStore;
+      this.store = {
+        version: 1,
+        clients: parsed.clients as Record<string, RegisteredClient>,
+        accessTokens: parsed.accessTokens as Record<string, TokenRecord>,
+        refreshTokens: parsed.refreshTokens as Record<string, TokenRecord>,
+        pendingAuthorizations:
+          parsed.pendingAuthorizations &&
+          typeof parsed.pendingAuthorizations === 'object'
+            ? parsed.pendingAuthorizations
+            : {},
+        authorizationCodes:
+          parsed.authorizationCodes &&
+          typeof parsed.authorizationCodes === 'object'
+            ? parsed.authorizationCodes
+            : {},
+      };
     } catch (error: any) {
       if (error?.code !== 'ENOENT') throw error;
       this.store = emptyStore();
     }
 
-    if (this.purgeExpiredTokens()) {
+    const purgedTokens = this.purgeExpiredTokens();
+    const purgedTransientState = this.cleanupTransientState();
+    if (purgedTokens || purgedTransientState) {
       await this.persist();
     }
   }
@@ -517,7 +538,9 @@ export class SelfHostedOAuthServer {
       codeChallenge,
       expiresAt: Date.now() + AUTH_REQUEST_TTL_MS,
     };
-    this.pendingAuthorizations.set(id, pending);
+    const { id: _requestId, ...storedPending } = pending;
+    this.store.pendingAuthorizations[hashToken(id)] = storedPending;
+    await this.persist();
 
     sendHtml(res, 200, this.renderLoginPage(pending));
   }
@@ -542,9 +565,13 @@ export class SelfHostedOAuthServer {
     }
 
     const requestId = form.get('request_id') ?? '';
-    const pending = this.pendingAuthorizations.get(requestId);
-    if (!pending || pending.expiresAt <= Date.now()) {
-      this.pendingAuthorizations.delete(requestId);
+    const requestHash = hashToken(requestId);
+    const storedPending = this.store.pendingAuthorizations[requestHash];
+    if (!storedPending || storedPending.expiresAt <= Date.now()) {
+      if (storedPending) {
+        delete this.store.pendingAuthorizations[requestHash];
+        await this.persist();
+      }
       sendHtml(
         res,
         400,
@@ -555,6 +582,10 @@ export class SelfHostedOAuthServer {
       );
       return;
     }
+    const pending: PendingAuthorization = {
+      ...storedPending,
+      id: requestId,
+    };
 
     this.trimFailedPasswordAttempts();
     if (this.failedPasswordAttempts.length >= MAX_FAILED_PASSWORD_ATTEMPTS) {
@@ -581,17 +612,18 @@ export class SelfHostedOAuthServer {
     }
 
     this.failedPasswordAttempts = [];
-    this.pendingAuthorizations.delete(requestId);
+    delete this.store.pendingAuthorizations[requestHash];
 
     const code = randomToken(32);
-    this.authorizationCodes.set(code, {
+    this.store.authorizationCodes[hashToken(code)] = {
       clientId: pending.clientId,
       redirectUri: pending.redirectUri,
       resource: pending.resource,
       scope: pending.scope,
       codeChallenge: pending.codeChallenge,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
-    });
+    };
+    await this.persist();
 
     const target = new URL(pending.redirectUri);
     target.searchParams.set('code', code);
@@ -641,8 +673,12 @@ export class SelfHostedOAuthServer {
     res: http.ServerResponse,
   ): Promise<void> {
     const code = form.get('code') ?? '';
-    const record = this.authorizationCodes.get(code);
-    this.authorizationCodes.delete(code);
+    const codeHash = hashToken(code);
+    const record = this.store.authorizationCodes[codeHash];
+    if (record) {
+      delete this.store.authorizationCodes[codeHash];
+      await this.persist();
+    }
 
     if (!record || record.expiresAt <= Date.now()) {
       oauthError(res, 400, 'invalid_grant', 'Authorization code is invalid or expired');
@@ -1109,14 +1145,26 @@ ${error}
     );
   }
 
-  private cleanupTransientState(): void {
+  private cleanupTransientState(): boolean {
     const now = Date.now();
-    for (const [id, pending] of this.pendingAuthorizations) {
-      if (pending.expiresAt <= now) this.pendingAuthorizations.delete(id);
+    let changed = false;
+    for (const [requestHash, pending] of Object.entries(
+      this.store.pendingAuthorizations,
+    )) {
+      if (pending.expiresAt <= now) {
+        delete this.store.pendingAuthorizations[requestHash];
+        changed = true;
+      }
     }
-    for (const [code, record] of this.authorizationCodes) {
-      if (record.expiresAt <= now) this.authorizationCodes.delete(code);
+    for (const [codeHash, record] of Object.entries(
+      this.store.authorizationCodes,
+    )) {
+      if (record.expiresAt <= now) {
+        delete this.store.authorizationCodes[codeHash];
+        changed = true;
+      }
     }
+    return changed;
   }
 
   private purgeExpiredTokens(): boolean {
