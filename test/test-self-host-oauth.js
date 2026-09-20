@@ -260,6 +260,22 @@ try {
     'new access token should authenticate',
   );
 
+  const reusedAuthorizationCode = await fetch(`${localBase}/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: registration.client_id,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+      resource: issuer,
+    }),
+  });
+  assert.equal(reusedAuthorizationCode.status, 400);
+  const reusedAuthorizationCodeBody = await reusedAuthorizationCode.json();
+  assert.equal(reusedAuthorizationCodeBody.error, 'invalid_grant');
+
   const refreshResponse = await fetch(`${localBase}/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
