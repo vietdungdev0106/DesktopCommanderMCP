@@ -26,6 +26,26 @@ const config = resolveOAuthConfig({
 
 assert.equal(config.issuer, issuer);
 assert.equal(config.resource, issuer);
+assert.equal(config.adminPassword, adminPassword);
+
+// Custom passwords are accepted exactly as provided, including values shorter
+// than the previous 16-byte minimum and common shell-special characters.
+const customPassword = 'MyP@ss!assert.equal(config.issuer, issuer);
+assert.equal(config.resource, issuer);7';
+const customPasswordConfig = resolveOAuthConfig({
+  DC_OAUTH_ISSUER: issuer,
+  DC_OAUTH_ADMIN_PASSWORD: customPassword,
+});
+assert.equal(customPasswordConfig.adminPassword, customPassword);
+
+assert.throws(
+  () =>
+    resolveOAuthConfig({
+      DC_OAUTH_ISSUER: issuer,
+      DC_OAUTH_ADMIN_PASSWORD: '',
+    }),
+  /must not be empty/,
+);
 assert.throws(
   () =>
     resolveOAuthConfig({
