@@ -169,11 +169,14 @@ After approval, ChatGPT exchanges the authorization code using PKCE and stores
 the resulting connection tokens. Access tokens default to one hour. Refresh
 tokens default to 30 days and rotate on every successful refresh.
 
-A successful authorization form submission is expected to return an HTTP
-redirect (normally `302`) to ChatGPT's OAuth callback with `code`, `state`, and
-`iss` query parameters. Do not submit the same authorization form again. If a
-duplicate submit occurs, the server reports that the authorization was already
-completed instead of treating it as an expired request.
+A successful authorization form submission returns an HTTP `303 See Other`
+redirect to ChatGPT's OAuth callback with `code`, `state`, and `iss` query
+parameters. The authorization page CSP explicitly allows the configured OAuth
+redirect origins (for ChatGPT, `https://chatgpt.com`) so Chromium browsers do not
+block the cross-origin redirect after the form POST. Do not submit the same
+authorization form again. If a duplicate submit occurs, the server reports
+that the authorization was already completed instead of treating it as an
+expired request.
 
 For OAuth troubleshooting, the self-host server logs high-level trace lines
 without printing raw authorization codes, request IDs, passwords, access
