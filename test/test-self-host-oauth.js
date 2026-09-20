@@ -30,8 +30,7 @@ assert.equal(config.adminPassword, adminPassword);
 
 // Custom passwords are accepted exactly as provided, including values shorter
 // than the previous 16-byte minimum and common shell-special characters.
-const customPassword = 'MyP@ss!assert.equal(config.issuer, issuer);
-assert.equal(config.resource, issuer);7';
+const customPassword = 'MyP@ss!$&7';
 const customPasswordConfig = resolveOAuthConfig({
   DC_OAUTH_ISSUER: issuer,
   DC_OAUTH_ADMIN_PASSWORD: customPassword,
@@ -55,7 +54,7 @@ assert.throws(
   /https/,
 );
 
-const oauth = new SelfHostedOAuthServer(config);
+let oauth = new SelfHostedOAuthServer(config);
 await oauth.initialize();
 
 const server = http.createServer(async (req, res) => {
@@ -200,6 +199,11 @@ try {
   )?.[1];
   assert.ok(requestId);
 
+  // Simulate a process restart after ChatGPT has opened the authorization page.
+  // The pending request must survive and still accept the submitted password.
+  oauth = new SelfHostedOAuthServer(config);
+  await oauth.initialize();
+
   const wrongPassword = await fetch(`${localBase}/authorize`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -229,6 +233,11 @@ try {
   const code = callback.searchParams.get('code');
   assert.ok(code);
 
+  // Simulate another process restart after approval but before ChatGPT exchanges
+  // the authorization code. The short-lived code must survive exactly once.
+  oauth = new SelfHostedOAuthServer(config);
+  await oauth.initialize();
+
   const tokenResponse = await fetch(`${localBase}/token`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -250,6 +259,22 @@ try {
     oauth.authenticateBearer(`Bearer ${tokens.access_token}`),
     'new access token should authenticate',
   );
+
+  const reusedAuthorizationCode = await fetch(`${localBase}/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: registration.client_id,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+      resource: issuer,
+    }),
+  });
+  assert.equal(reusedAuthorizationCode.status, 400);
+  const reusedAuthorizationCodeBody = await reusedAuthorizationCode.json();
+  assert.equal(reusedAuthorizationCodeBody.error, 'invalid_grant');
 
   const refreshResponse = await fetch(`${localBase}/token`, {
     method: 'POST',
@@ -280,12 +305,21 @@ try {
   const reusedBody = await reusedRefresh.json();
   assert.equal(reusedBody.error, 'invalid_grant');
 
-  const persisted = JSON.parse(
-    await fs.readFile(config.storePath, 'utf8'),
-  );
+  const persistedRaw = await fs.readFile(config.storePath, 'utf8');
+  const persisted = JSON.parse(persistedRaw);
   assert.equal(persisted.version, 1);
   assert.ok(Object.keys(persisted.clients).length >= 1);
   assert.ok(Object.keys(persisted.refreshTokens).length >= 1);
+  assert.ok(persisted.pendingAuthorizations);
+  assert.ok(persisted.authorizationCodes);
+  assert.ok(
+    !persistedRaw.includes(requestId),
+    'raw authorization request IDs must not be persisted',
+  );
+  assert.ok(
+    !persistedRaw.includes(code),
+    'raw authorization codes must not be persisted',
+  );
 
   console.log('PASS self-host OAuth 2.1 + PKCE flow');
 } finally {
