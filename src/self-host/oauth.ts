@@ -810,8 +810,14 @@ export class SelfHostedOAuthServer {
       return;
     }
 
-    const redirectUris = Array.isArray(body?.redirect_uris)
-      ? [...new Set(body.redirect_uris.filter((item: unknown) => typeof item === 'string'))]
+    const redirectUris: string[] = Array.isArray(body?.redirect_uris)
+      ? [
+          ...new Set(
+            body.redirect_uris.filter(
+              (item: unknown): item is string => typeof item === 'string',
+            ),
+          ),
+        ]
       : [];
 
     if (redirectUris.length === 0 || redirectUris.length > 10) {
