@@ -289,7 +289,7 @@ Cloudflare, so there is no reason to expose port 8765 on the LAN or router.
 | `DC_MCP_ALLOW_NON_LOOPBACK` | false | Explicitly permit a non-loopback bind |
 | `DC_MCP_MAX_SESSIONS` | `32` | Maximum retained Streamable HTTP MCP sessions; oldest idle sessions are evicted above this cap |
 | `DC_MCP_SESSION_IDLE_MS` | `600000` | Close inactive MCP sessions after this many milliseconds |
-| `DC_LOCAL_MCP_TOOL_TIMEOUT_MS` | `120000` | Base timeout for gateway → local Desktop Commander tool calls; process tools automatically extend this to at least their requested `timeout_ms` plus 30 seconds, capped at 10 minutes |
+| `DC_LOCAL_MCP_TOOL_TIMEOUT_MS` | `120000` | Base timeout for gateway → local Desktop Commander tool calls; process tools automatically extend this to at least their requested `timeout_ms` plus 30 seconds, capped at 30 minutes |
 
 Self-host mode forcibly sets these internally:
 
@@ -313,7 +313,7 @@ The local stdio MCP client also has its own request timeout. The gateway uses a
 120-second base timeout instead of the MCP SDK's 60-second fallback. For
 `start_process`, `read_process_output`, and `interact_with_process`, the
 gateway timeout is automatically extended to at least the tool's
-`timeout_ms + 30000`, up to 10 minutes. This prevents the proxy layer from
+`timeout_ms + 30000`, up to 30 minutes. This prevents the proxy layer from
 timing out before the process tool's own timeout has elapsed.
 
 The health endpoint reports the live session count:
