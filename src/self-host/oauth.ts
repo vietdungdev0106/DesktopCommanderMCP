@@ -334,8 +334,11 @@ export class SelfHostedOAuthServer {
       const parsed = JSON.parse(raw) as Partial<OAuthStore>;
       if (
         parsed.version !== 1 ||
+        !parsed.clients ||
         typeof parsed.clients !== 'object' ||
+        !parsed.accessTokens ||
         typeof parsed.accessTokens !== 'object' ||
+        !parsed.refreshTokens ||
         typeof parsed.refreshTokens !== 'object'
       ) {
         throw new Error('Unsupported or invalid OAuth store format');
