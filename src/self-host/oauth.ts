@@ -810,15 +810,14 @@ export class SelfHostedOAuthServer {
       return;
     }
 
-    const redirectUris: string[] = Array.isArray(body?.redirect_uris)
-      ? [
-          ...new Set(
-            body.redirect_uris.filter(
-              (item: unknown): item is string => typeof item === 'string',
-            ),
-          ),
-        ]
-      : [];
+    const redirectUris: string[] = [];
+    if (Array.isArray(body?.redirect_uris)) {
+      for (const item of body.redirect_uris as unknown[]) {
+        if (typeof item === 'string' && !redirectUris.includes(item)) {
+          redirectUris.push(item);
+        }
+      }
+    }
 
     if (redirectUris.length === 0 || redirectUris.length > 10) {
       oauthError(
