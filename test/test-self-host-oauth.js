@@ -226,6 +226,21 @@ try {
   });
   assert.equal(approveResponse.status, 302);
 
+  const duplicateApproveResponse = await fetch(`${localBase}/authorize`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      request_id: requestId,
+      password: adminPassword,
+    }),
+    redirect: 'manual',
+  });
+  assert.equal(duplicateApproveResponse.status, 200);
+  assert.match(
+    await duplicateApproveResponse.text(),
+    /Authorization already completed/,
+  );
+
   const callback = new URL(approveResponse.headers.get('location'));
   assert.equal(callback.origin, 'https://chatgpt.com');
   assert.equal(callback.searchParams.get('state'), 'test-state');
@@ -312,6 +327,7 @@ try {
   assert.ok(Object.keys(persisted.refreshTokens).length >= 1);
   assert.ok(persisted.pendingAuthorizations);
   assert.ok(persisted.authorizationCodes);
+  assert.ok(persisted.completedAuthorizationRequests);
   assert.ok(
     !persistedRaw.includes(requestId),
     'raw authorization request IDs must not be persisted',

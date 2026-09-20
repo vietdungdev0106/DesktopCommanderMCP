@@ -169,6 +169,27 @@ After approval, ChatGPT exchanges the authorization code using PKCE and stores
 the resulting connection tokens. Access tokens default to one hour. Refresh
 tokens default to 30 days and rotate on every successful refresh.
 
+A successful authorization form submission is expected to return an HTTP
+redirect (normally `302`) to ChatGPT's OAuth callback with `code`, `state`, and
+`iss` query parameters. Do not submit the same authorization form again. If a
+duplicate submit occurs, the server reports that the authorization was already
+completed instead of treating it as an expired request.
+
+For OAuth troubleshooting, the self-host server logs high-level trace lines
+without printing raw authorization codes, request IDs, passwords, access
+tokens, or refresh tokens. Useful messages include:
+
+```text
+[self-host][oauth] Authorization approved ...
+[self-host][oauth] Token exchange received ...
+[self-host][oauth] Token exchange succeeded ...
+[self-host][oauth] Token exchange rejected ... reason=...
+```
+
+If authorization succeeds but no "Token exchange received" line appears, the
+failure is between the browser callback and ChatGPT rather than in the local
+token endpoint.
+
 ### OAuth state persistence
 
 OAuth registrations and token hashes are persisted by default at:

@@ -38,6 +38,10 @@ type RegisteredClient = {
 
 type StoredPendingAuthorization = Omit<PendingAuthorization, 'id'>;
 
+type CompletedAuthorizationRequest = {
+  expiresAt: number;
+};
+
 type OAuthStore = {
   version: 1;
   clients: Record<string, RegisteredClient>;
@@ -45,6 +49,7 @@ type OAuthStore = {
   refreshTokens: Record<string, TokenRecord>;
   pendingAuthorizations: Record<string, StoredPendingAuthorization>;
   authorizationCodes: Record<string, AuthorizationCode>;
+  completedAuthorizationRequests: Record<string, CompletedAuthorizationRequest>;
 };
 
 type ClientValidation = {
@@ -194,6 +199,7 @@ function emptyStore(): OAuthStore {
     refreshTokens: {},
     pendingAuthorizations: {},
     authorizationCodes: {},
+    completedAuthorizationRequests: {},
   };
 }
 
@@ -357,6 +363,11 @@ export class SelfHostedOAuthServer {
           parsed.authorizationCodes &&
           typeof parsed.authorizationCodes === 'object'
             ? parsed.authorizationCodes
+            : {},
+        completedAuthorizationRequests:
+          parsed.completedAuthorizationRequests &&
+          typeof parsed.completedAuthorizationRequests === 'object'
+            ? parsed.completedAuthorizationRequests
             : {},
       };
     } catch (error: any) {
@@ -569,12 +580,39 @@ export class SelfHostedOAuthServer {
 
     const requestId = form.get('request_id') ?? '';
     const requestHash = hashToken(requestId);
+    const requestTrace = requestHash.slice(0, 12);
     const storedPending = this.store.pendingAuthorizations[requestHash];
     if (!storedPending || storedPending.expiresAt <= Date.now()) {
+      const completed = this.store.completedAuthorizationRequests[requestHash];
+      if (completed && completed.expiresAt > Date.now()) {
+        console.error(
+          `[self-host][oauth] Duplicate authorize submit ignored request=${requestTrace}; authorization already completed`,
+        );
+        sendHtml(
+          res,
+          200,
+          this.renderErrorPage(
+            'Authorization already completed',
+            'This authorization request was already approved. Return to ChatGPT and continue the connection there.',
+          ),
+        );
+        return;
+      }
+
+      let changed = false;
       if (storedPending) {
         delete this.store.pendingAuthorizations[requestHash];
-        await this.persist();
+        changed = true;
       }
+      if (completed) {
+        delete this.store.completedAuthorizationRequests[requestHash];
+        changed = true;
+      }
+      if (changed) await this.persist();
+
+      console.error(
+        `[self-host][oauth] Authorization request missing or expired request=${requestTrace}`,
+      );
       sendHtml(
         res,
         400,
@@ -618,15 +656,24 @@ export class SelfHostedOAuthServer {
     delete this.store.pendingAuthorizations[requestHash];
 
     const code = randomToken(32);
-    this.store.authorizationCodes[hashToken(code)] = {
+    const codeHash = hashToken(code);
+    const codeExpiresAt = Date.now() + AUTH_CODE_TTL_MS;
+    this.store.authorizationCodes[codeHash] = {
       clientId: pending.clientId,
       redirectUri: pending.redirectUri,
       resource: pending.resource,
       scope: pending.scope,
       codeChallenge: pending.codeChallenge,
-      expiresAt: Date.now() + AUTH_CODE_TTL_MS,
+      expiresAt: codeExpiresAt,
+    };
+    this.store.completedAuthorizationRequests[requestHash] = {
+      expiresAt: codeExpiresAt,
     };
     await this.persist();
+
+    console.error(
+      `[self-host][oauth] Authorization approved request=${requestTrace} code=${codeHash.slice(0, 12)} client=${pending.clientId}`,
+    );
 
     const target = new URL(pending.redirectUri);
     target.searchParams.set('code', code);
@@ -677,13 +724,24 @@ export class SelfHostedOAuthServer {
   ): Promise<void> {
     const code = form.get('code') ?? '';
     const codeHash = hashToken(code);
+    const codeTrace = codeHash.slice(0, 12);
     const record = this.store.authorizationCodes[codeHash];
+
+    console.error(
+      `[self-host][oauth] Token exchange received code=${codeTrace} grant=authorization_code`,
+    );
+
     if (record) {
+      // Authorization codes are one-time credentials. Consume before validating
+      // the remaining bindings so retries/replays cannot reuse the same code.
       delete this.store.authorizationCodes[codeHash];
       await this.persist();
     }
 
     if (!record || record.expiresAt <= Date.now()) {
+      console.error(
+        `[self-host][oauth] Token exchange rejected code=${codeTrace} reason=invalid_or_expired`,
+      );
       oauthError(res, 400, 'invalid_grant', 'Authorization code is invalid or expired');
       return;
     }
@@ -699,6 +757,9 @@ export class SelfHostedOAuthServer {
       resource !== record.resource ||
       resource !== this.config.resource
     ) {
+      console.error(
+        `[self-host][oauth] Token exchange rejected code=${codeTrace} reason=binding_mismatch client_match=${clientId === record.clientId} redirect_match=${redirectUri === record.redirectUri} resource_match=${resource === record.resource} configured_resource_match=${resource === this.config.resource}`,
+      );
       oauthError(res, 400, 'invalid_grant', 'Authorization code binding mismatch');
       return;
     }
@@ -707,6 +768,9 @@ export class SelfHostedOAuthServer {
       !isValidPkceVerifier(verifier) ||
       !constantTimeTextEqual(pkceS256(verifier), record.codeChallenge)
     ) {
+      console.error(
+        `[self-host][oauth] Token exchange rejected code=${codeTrace} reason=pkce_failed`,
+      );
       oauthError(res, 400, 'invalid_grant', 'PKCE verification failed');
       return;
     }
@@ -716,6 +780,9 @@ export class SelfHostedOAuthServer {
       resource,
       scope: record.scope,
     });
+    console.error(
+      `[self-host][oauth] Token exchange succeeded code=${codeTrace} client=${clientId}`,
+    );
   }
 
   private async exchangeRefreshToken(
@@ -1164,6 +1231,14 @@ ${error}
     )) {
       if (record.expiresAt <= now) {
         delete this.store.authorizationCodes[codeHash];
+        changed = true;
+      }
+    }
+    for (const [requestHash, record] of Object.entries(
+      this.store.completedAuthorizationRequests,
+    )) {
+      if (record.expiresAt <= now) {
+        delete this.store.completedAuthorizationRequests[requestHash];
         changed = true;
       }
     }
