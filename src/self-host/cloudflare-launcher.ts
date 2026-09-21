@@ -148,10 +148,14 @@ async function stopChild(
 ): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
 
+  const exited = new Promise<void>((resolve) =>
+    child.once('exit', () => resolve()),
+  );
+
   child.kill('SIGTERM');
 
   await Promise.race([
-    new Promise<void>((resolve) => child.once('exit', () => resolve())),
+    exited,
     new Promise<void>((resolve) =>
       setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
