@@ -344,6 +344,32 @@ DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES=1
 This prevents the local Desktop Commander child from contacting the upstream
 telemetry and feature-flag services.
 
+## MCP App UI resources
+
+Desktop Commander tools such as `get_config` and `read_file` can advertise
+MCP App UI metadata, including `openai/outputTemplate` /
+`ui/resourceUri`. The self-host gateway preserves that metadata and proxies
+the local Desktop Commander resource API so ChatGPT can actually load the
+referenced templates.
+
+The gateway advertises the `resources` capability and proxies:
+
+```text
+resources/list
+resources/templates/list
+resources/read
+```
+
+This includes the packaged UI resources:
+
+```text
+ui://desktop-commander/config-editor
+ui://desktop-commander/file-preview
+```
+
+Without this proxy, tool execution can still succeed, but ChatGPT may show
+`Failed to fetch template` while trying to render the MCP App card.
+
 ## Stateless HTTP transport and tool-call timeouts
 
 The public MCP endpoint intentionally uses the MCP SDK 1.x stateless
@@ -400,8 +426,11 @@ The OAuth integration test performs a complete local DCR → authorization →
 PKCE token exchange → refresh-token rotation flow without contacting ChatGPT.
 The stateless transport integration test launches the real self-host server,
 verifies that initialize and `tools/list` work as independent POST requests
-without an `Mcp-Session-Id`, confirms JSON responses, and verifies GET
-`/mcp` is rejected with `405`.
+without an `Mcp-Session-Id`, confirms JSON responses, verifies the
+`get_config` output-template URI is present in `resources/list`, reads the
+packaged MCP App HTML through `resources/read`, checks
+`resources/templates/list`, and verifies GET `/mcp` is rejected with
+`405`.
 
 The normal stdio entrypoint remains unchanged, so upstream/local clients can
 still use:
