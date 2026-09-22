@@ -136,6 +136,91 @@ try {
   assert(Array.isArray(listToolsBody.result.tools));
   assert(listToolsBody.result.tools.length > 0);
 
+  const getConfigTool = listToolsBody.result.tools.find(
+    (tool) => tool.name === 'get_config',
+  );
+  assert(getConfigTool, 'get_config tool must be exposed');
+  const configTemplateUri = getConfigTool._meta?.['openai/outputTemplate'];
+  assert.equal(
+    configTemplateUri,
+    'ui://desktop-commander/config-editor',
+  );
+
+  const listResources = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: {
+      ...commonHeaders,
+      'mcp-protocol-version': initializeBody.result.protocolVersion,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'resources/list',
+      params: {},
+    }),
+  });
+
+  assert.equal(listResources.status, 200);
+  const listResourcesBody = await listResources.json();
+  assert.equal(listResourcesBody.id, 3);
+  assert(Array.isArray(listResourcesBody.result.resources));
+  assert(
+    listResourcesBody.result.resources.some(
+      (resource) => resource.uri === configTemplateUri,
+    ),
+    'resources/list must expose the URI referenced by get_config outputTemplate',
+  );
+
+  const readResource = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: {
+      ...commonHeaders,
+      'mcp-protocol-version': initializeBody.result.protocolVersion,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'resources/read',
+      params: {
+        uri: configTemplateUri,
+      },
+    }),
+  });
+
+  assert.equal(readResource.status, 200);
+  const readResourceBody = await readResource.json();
+  assert.equal(readResourceBody.id, 4);
+  assert(Array.isArray(readResourceBody.result.contents));
+  assert.equal(readResourceBody.result.contents[0].uri, configTemplateUri);
+  assert.match(
+    readResourceBody.result.contents[0].mimeType ?? '',
+    /^text\/html;profile=mcp-app$/i,
+  );
+  assert(
+    typeof readResourceBody.result.contents[0].text === 'string' &&
+      readResourceBody.result.contents[0].text.length > 100,
+    'resources/read must return the packaged MCP App HTML template',
+  );
+
+  const listResourceTemplates = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: {
+      ...commonHeaders,
+      'mcp-protocol-version': initializeBody.result.protocolVersion,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'resources/templates/list',
+      params: {},
+    }),
+  });
+
+  assert.equal(listResourceTemplates.status, 200);
+  const listResourceTemplatesBody = await listResourceTemplates.json();
+  assert.equal(listResourceTemplatesBody.id, 5);
+  assert(Array.isArray(listResourceTemplatesBody.result.resourceTemplates));
+
   const getMcp = await fetch(`${base}/mcp`, {
     method: 'GET',
     headers: {

@@ -316,6 +316,45 @@ export class DesktopCommanderIntegration {
         }
     }
 
+    async listClientResources() {
+        await this.ensureReady();
+
+        try {
+            return await this.mcpClient!.listResources();
+        } catch (error) {
+            console.error('Error fetching MCP resources:', error);
+            await captureRemote('desktop_integration_list_resources_failed', { error });
+            throw error;
+        }
+    }
+
+    async listClientResourceTemplates() {
+        await this.ensureReady();
+
+        try {
+            return await this.mcpClient!.listResourceTemplates();
+        } catch (error) {
+            console.error('Error fetching MCP resource templates:', error);
+            await captureRemote('desktop_integration_list_resource_templates_failed', { error });
+            throw error;
+        }
+    }
+
+    async readClientResource(uri: string) {
+        await this.ensureReady();
+
+        try {
+            console.debug('[DEBUG] Reading MCP resource:', uri);
+            const result = await this.mcpClient!.readResource({ uri });
+            console.debug('[DEBUG] MCP resource read successful:', uri);
+            return result;
+        } catch (error) {
+            console.error(`Error reading MCP resource ${uri}:`, error);
+            await captureRemote('desktop_integration_read_resource_failed', { error, uri });
+            throw error;
+        }
+    }
+
     async shutdown() {
         console.debug('[DEBUG] DesktopCommanderIntegration.shutdown() called');
         // Closing the transport fires onclose; flag this as intentional so it is

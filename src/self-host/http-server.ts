@@ -8,7 +8,10 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   CallToolRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { DesktopCommanderIntegration } from '../remote-device/desktop-commander-integration.js';
 import { VERSION } from '../version.js';
@@ -128,6 +131,7 @@ async function createRequestContext(): Promise<RequestContext> {
     {
       capabilities: {
         tools: {},
+        resources: {},
       },
     },
   );
@@ -146,6 +150,21 @@ async function createRequestContext(): Promise<RequestContext> {
     const toolName = request.params.name;
     const args = request.params.arguments ?? {};
     return (await desktop.callClientTool(toolName, args)) as any;
+  });
+
+  mcpServer.setRequestHandler(ListResourcesRequestSchema, async () => {
+    return (await desktop.listClientResources()) as any;
+  });
+
+  mcpServer.setRequestHandler(
+    ListResourceTemplatesRequestSchema,
+    async () => {
+      return (await desktop.listClientResourceTemplates()) as any;
+    },
+  );
+
+  mcpServer.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    return (await desktop.readClientResource(request.params.uri)) as any;
   });
 
   const transport = new StreamableHTTPServerTransport({
