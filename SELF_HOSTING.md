@@ -232,14 +232,14 @@ OAuth access token. OAuth discovery is still published for ChatGPT.
 
 ## Cloudflare Tunnel
 
-Install cloudflared on macOS:
+Install and authenticate `cloudflared` once:
 
 ```bash
 brew install cloudflared
 cloudflared tunnel login
 ```
 
-Create a named tunnel:
+Create a named tunnel and DNS route once:
 
 ```bash
 cloudflared tunnel create desktop-commander
@@ -247,13 +247,57 @@ cloudflared tunnel route dns desktop-commander mcp.example.com
 ```
 
 Copy `deploy/cloudflare/config.example.yml` to
-`~/.cloudflared/config.yml`, replace the tunnel UUID, credentials path and
-hostname, then validate and run:
+`~/.cloudflared/config.yml`, then replace the tunnel UUID, credentials path
+and hostname. Validate it once:
 
 ```bash
 cloudflared tunnel ingress validate
-cloudflared tunnel run desktop-commander
 ```
+
+### Run MCP + Cloudflare in one terminal
+
+The repository includes a supervisor that starts the local self-host MCP,
+waits for `/health`, starts the named Cloudflare Tunnel, forwards both
+processes to the same terminal, and shuts both down together with `Ctrl+C`.
+
+If `~/.cloudflared/config.yml` contains the `tunnel:` field, no Cloudflare
+environment variable is required. From a source checkout, one command builds
+and starts everything:
+
+```bash
+export DC_AUTH_MODE=oauth
+export DC_OAUTH_ISSUER="https://mcp.example.com"
+export DC_OAUTH_ADMIN_PASSWORD='your-custom-password'
+
+npm run self-host:cloudflare
+```
+
+For an already-built checkout, skip the build step:
+
+```bash
+npm run start:self-host:cloudflare
+```
+
+If the tunnel name or UUID is not present in the default Cloudflare config,
+provide it explicitly:
+
+```bash
+export DC_CLOUDFLARE_TUNNEL="desktop-commander"
+npm run self-host:cloudflare
+```
+
+If the Cloudflare config is stored somewhere else:
+
+```bash
+export DC_CLOUDFLARE_CONFIG="~/.cloudflared/desktop-commander.yml"
+export DC_CLOUDFLARE_TUNNEL="desktop-commander"
+npm run self-host:cloudflare
+```
+
+The launcher performs a `cloudflared --version` preflight before starting the
+MCP server. If either the MCP server or `cloudflared` exits unexpectedly, the
+launcher stops the other process too rather than leaving half of the stack
+running.
 
 Your public MCP URL is then:
 
@@ -261,14 +305,9 @@ Your public MCP URL is then:
 https://mcp.example.com/mcp
 ```
 
-Configure the MCP client to send:
-
-```text
-Authorization: Bearer <DC_MCP_TOKEN>
-```
-
-Keep the origin bound to localhost. The tunnel makes an outbound connection to
-Cloudflare, so there is no reason to expose port 8765 on the LAN or router.
+Keep the origin bound to localhost. Cloudflare Tunnel makes an outbound
+connection to Cloudflare, so there is no reason to expose port 8765 on the LAN
+or router.
 
 ## Environment variables
 
@@ -290,6 +329,10 @@ Cloudflare, so there is no reason to expose port 8765 on the LAN or router.
 | `DC_MCP_MAX_SESSIONS` | `32` | Maximum retained Streamable HTTP MCP sessions; oldest idle sessions are evicted above this cap |
 | `DC_MCP_SESSION_IDLE_MS` | `600000` | Close inactive MCP sessions after this many milliseconds |
 | `DC_LOCAL_MCP_TOOL_TIMEOUT_MS` | `120000` | Base timeout for gateway → local Desktop Commander tool calls; process tools automatically extend this to at least their requested `timeout_ms` plus 30 seconds, capped at 30 minutes |
+| `DC_CLOUDFLARED_BIN` | `cloudflared` | Path/name of the cloudflared executable used by the one-terminal launcher |
+| `DC_CLOUDFLARE_CONFIG` | cloudflared default config lookup | Optional config path passed as `cloudflared tunnel --config <path> run`; `~/...` is expanded |
+| `DC_CLOUDFLARE_TUNNEL` | value from Cloudflare config | Optional named tunnel or UUID appended to `cloudflared tunnel run` |
+| `DC_SELF_HOST_STARTUP_TIMEOUT_MS` | `20000` | How long the launcher waits for the local `/health` endpoint before aborting startup |
 
 Self-host mode forcibly sets these internally:
 
