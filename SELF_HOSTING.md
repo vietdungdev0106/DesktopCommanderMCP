@@ -326,8 +326,8 @@ or router.
 | `DC_MCP_HOST` | `127.0.0.1` | Local listen host |
 | `DC_MCP_PORT` | `8765` | Local listen port |
 | `DC_MCP_ALLOW_NON_LOOPBACK` | false | Explicitly permit a non-loopback bind |
-| `DC_MCP_MAX_SESSIONS` | `32` | Maximum retained Streamable HTTP MCP sessions; oldest idle sessions are evicted above this cap |
-| `DC_MCP_SESSION_IDLE_MS` | `600000` | Close inactive MCP sessions after this many milliseconds |
+| `DC_MCP_MAX_SESSIONS` | `64` | Soft cap for retained Streamable HTTP MCP sessions; only disconnected/idle sessions are eligible for eviction above this cap |
+| `DC_MCP_SESSION_IDLE_MS` | `3600000` | Close fully inactive MCP sessions after this many milliseconds; sessions with an open SSE stream or active request are protected |
 | `DC_LOCAL_MCP_TOOL_TIMEOUT_MS` | `120000` | Base timeout for gateway → local Desktop Commander tool calls; process tools automatically extend this to at least their requested `timeout_ms` plus 30 seconds, capped at 30 minutes |
 | `DC_CLOUDFLARED_BIN` | `cloudflared` | Path/name of the cloudflared executable used by the one-terminal launcher |
 | `DC_CLOUDFLARE_CONFIG` | cloudflared default config lookup | Optional config path passed as `cloudflared tunnel --config <path> run`; `~/...` is expanded |
@@ -348,9 +348,23 @@ telemetry and feature-flag services.
 ## Session lifecycle and tool-call timeouts
 
 ChatGPT can reconnect and create new Streamable HTTP sessions without always
-terminating every older session explicitly. The self-host gateway therefore
-keeps a stable copy of each initialized session ID, reaps sessions that have
-been idle for 10 minutes, and caps retained sessions at 32 by default.
+terminating every older session explicitly. The self-host gateway keeps a
+stable copy of each initialized session ID and now follows all three relevant
+lifecycle signals:
+
+- `onsessionclosed` for an MCP `DELETE` session close;
+- transport `onclose` for full transport shutdown;
+- Node response `close`/`finish` for standalone GET/SSE stream lifetime.
+
+Open SSE streams and in-flight POST/DELETE requests are protected from both
+idle cleanup and session-cap eviction. The default idle timeout is one hour and
+the default session cap is a soft cap of 64; the gateway may temporarily exceed
+that cap rather than breaking a live ChatGPT stream.
+
+Tool/request responses use direct JSON mode instead of opening a short-lived
+SSE response for every POST. Standalone GET/SSE remains available for
+server-initiated notifications, but ordinary tool calls no longer create extra
+SSE response streams. This significantly reduces Cloudflare Tunnel stream churn.
 
 The local stdio MCP client also has its own request timeout. The gateway uses a
 120-second base timeout instead of the MCP SDK's 60-second fallback. For
@@ -365,8 +379,8 @@ The health endpoint reports the live session count:
 curl http://127.0.0.1:8765/health
 ```
 
-Relevant fields include `activeSessions`, `maxSessions`, and
-`sessionIdleMs`.
+Relevant fields include `activeSessions`, `activeSseStreams`,
+`evictableSessions`, `maxSessions`, and `sessionIdleMs`.
 
 ## Development
 

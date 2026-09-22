@@ -25,6 +25,10 @@ import {
   SelfHostedOAuthServer,
   resolveOAuthConfig,
 } from './oauth.js';
+import {
+  isSessionEvictable,
+  isSessionIdle,
+} from './session-policy.js';
 
 type SessionContext = {
   server: Server;
@@ -32,6 +36,7 @@ type SessionContext = {
   sessionId?: string;
   lastActivityAt: number;
   activeRequests: number;
+  openStreams: number;
   closing: boolean;
 };
 
@@ -62,9 +67,9 @@ function readPositiveIntEnv(name: string, fallback: number): number {
 
 const sessionIdleMs = readPositiveIntEnv(
   'DC_MCP_SESSION_IDLE_MS',
-  10 * 60 * 1000,
+  60 * 60 * 1000,
 );
-const maxSessions = readPositiveIntEnv('DC_MCP_MAX_SESSIONS', 32);
+const maxSessions = readPositiveIntEnv('DC_MCP_MAX_SESSIONS', 64);
 const sessionSweepMs = Math.max(
   5_000,
   Math.min(60_000, Math.floor(sessionIdleMs / 2)),
@@ -169,6 +174,7 @@ async function createSessionContext(): Promise<SessionContext> {
   let context!: SessionContext;
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
+    enableJsonResponse: true,
     onsessioninitialized: (sessionId) => {
       context.sessionId = sessionId;
       context.lastActivityAt = Date.now();
@@ -178,6 +184,9 @@ async function createSessionContext(): Promise<SessionContext> {
       );
       void enforceSessionLimit(sessionId);
     },
+    onsessionclosed: (sessionId) => {
+      void closeSession(context, sessionId, 'client DELETE');
+    },
   });
 
   context = {
@@ -185,6 +194,7 @@ async function createSessionContext(): Promise<SessionContext> {
     transport,
     lastActivityAt: Date.now(),
     activeRequests: 0,
+    openStreams: 0,
     closing: false,
   };
 
@@ -229,15 +239,18 @@ async function enforceSessionLimit(excludeSessionId?: string): Promise<void> {
       .filter(
         ([sessionId, context]) =>
           sessionId !== excludeSessionId &&
-          !context.closing &&
-          context.activeRequests === 0,
+          isSessionEvictable(context),
       )
       .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
 
     const oldest = candidates[0];
     if (!oldest) {
+      const protectedStreams = [...sessions.values()].reduce(
+        (total, context) => total + context.openStreams,
+        0,
+      );
       console.error(
-        `[self-host] Session cap exceeded (${sessions.size}/${maxSessions}) but all existing sessions are busy`,
+        `[self-host] Session soft cap exceeded (${sessions.size}/${maxSessions}); all older sessions are protected by active requests/SSE streams (openStreams=${protectedStreams})`,
       );
       return;
     }
@@ -250,11 +263,8 @@ async function reapIdleSessions(): Promise<void> {
   if (shuttingDown) return;
 
   const now = Date.now();
-  const stale = [...sessions.entries()].filter(
-    ([, context]) =>
-      !context.closing &&
-      context.activeRequests === 0 &&
-      now - context.lastActivityAt >= sessionIdleMs,
+  const stale = [...sessions.entries()].filter(([, context]) =>
+    isSessionIdle(context, now, sessionIdleMs),
   );
 
   await Promise.allSettled(
@@ -292,19 +302,38 @@ async function handleMcpRequest(
 
     context.lastActivityAt = Date.now();
 
-    // GET is the long-lived server-to-client SSE stream. Do not count it as a
-    // busy tool request, otherwise an abandoned stream can keep a session alive
-    // forever. POST/DELETE are bounded protocol operations and protect the
-    // session from eviction while they are executing.
-    const countsAsActiveRequest = req.method !== 'GET';
-    if (countsAsActiveRequest) context.activeRequests += 1;
+    // GET is the standalone server-to-client SSE stream. Track it separately
+    // from bounded POST/DELETE requests so an actually-open stream is never
+    // selected for idle/cap eviction, while a canceled stream stops protecting
+    // the session immediately.
+    const isStreamRequest = req.method === 'GET';
+    const countsAsActiveRequest = !isStreamRequest;
+    let releaseStream: (() => void) | undefined;
+
+    if (isStreamRequest) {
+      context.openStreams += 1;
+      let released = false;
+      releaseStream = () => {
+        if (released) return;
+        released = true;
+        context.openStreams = Math.max(0, context.openStreams - 1);
+        context.lastActivityAt = Date.now();
+      };
+      res.once('close', releaseStream);
+      res.once('finish', releaseStream);
+    } else {
+      context.activeRequests += 1;
+    }
+
     try {
       await context.transport.handleRequest(req, res);
     } finally {
       if (countsAsActiveRequest) {
         context.activeRequests = Math.max(0, context.activeRequests - 1);
+        context.lastActivityAt = Date.now();
+      } else if (res.writableEnded || res.destroyed) {
+        releaseStream?.();
       }
-      context.lastActivityAt = Date.now();
     }
     return;
   }
@@ -355,6 +384,12 @@ const httpServer = http.createServer(async (req, res) => {
         authMode,
         oauthIssuer: oauth?.config.issuer,
         activeSessions: sessions.size,
+        activeSseStreams: [...sessions.values()].reduce(
+          (total, context) => total + context.openStreams,
+          0,
+        ),
+        evictableSessions: [...sessions.values()].filter(isSessionEvictable)
+          .length,
         maxSessions,
         sessionIdleMs,
         vendorRemoteServices: false,
@@ -441,7 +476,7 @@ async function start(): Promise<void> {
     console.error(`[self-host] Health: http://${host}:${port}/health`);
     console.error(`[self-host] Authentication mode: ${authMode}`);
     console.error(
-      `[self-host] Session policy: max=${maxSessions}, idle=${sessionIdleMs}ms`,
+      `[self-host] Session policy: softMax=${maxSessions}, idle=${sessionIdleMs}ms, JSON responses enabled`,
     );
     if (oauth) {
       console.error(`[self-host] OAuth issuer: ${oauth.config.issuer}`);
