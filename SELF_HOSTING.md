@@ -97,8 +97,9 @@ curl -i \
   http://127.0.0.1:8765/mcp
 ```
 
-A GET without an MCP session is expected to return an MCP error. Use an MCP
-client/Inspector for a full protocol test.
+The public MCP endpoint runs in stateless JSON mode. Ordinary MCP traffic uses
+POST requests only; GET/DELETE requests to `/mcp` return `405 Method Not
+Allowed`. Use an MCP client/Inspector for a full protocol test.
 
 ## ChatGPT Web: OAuth 2.1 + PKCE
 
@@ -326,8 +327,6 @@ or router.
 | `DC_MCP_HOST` | `127.0.0.1` | Local listen host |
 | `DC_MCP_PORT` | `8765` | Local listen port |
 | `DC_MCP_ALLOW_NON_LOOPBACK` | false | Explicitly permit a non-loopback bind |
-| `DC_MCP_MAX_SESSIONS` | `64` | Soft cap for retained Streamable HTTP MCP sessions; only disconnected/idle sessions are eligible for eviction above this cap |
-| `DC_MCP_SESSION_IDLE_MS` | `3600000` | Close fully inactive MCP sessions after this many milliseconds; sessions with an open SSE stream or active request are protected |
 | `DC_LOCAL_MCP_TOOL_TIMEOUT_MS` | `120000` | Base timeout for gateway → local Desktop Commander tool calls; process tools automatically extend this to at least their requested `timeout_ms` plus 30 seconds, capped at 30 minutes |
 | `DC_CLOUDFLARED_BIN` | `cloudflared` | Path/name of the cloudflared executable used by the one-terminal launcher |
 | `DC_CLOUDFLARE_CONFIG` | cloudflared default config lookup | Optional config path passed as `cloudflared tunnel --config <path> run`; `~/...` is expanded |
@@ -345,42 +344,42 @@ DESKTOP_COMMANDER_DISABLE_REMOTE_SERVICES=1
 This prevents the local Desktop Commander child from contacting the upstream
 telemetry and feature-flag services.
 
-## Session lifecycle and tool-call timeouts
+## Stateless HTTP transport and tool-call timeouts
 
-ChatGPT can reconnect and create new Streamable HTTP sessions without always
-terminating every older session explicitly. The self-host gateway keeps a
-stable copy of each initialized session ID and now follows all three relevant
-lifecycle signals:
+The public MCP endpoint intentionally uses the MCP SDK 1.x stateless
+Streamable HTTP pattern: every authenticated POST gets a fresh lightweight MCP
+`Server` + `StreamableHTTPServerTransport`, with
+`sessionIdGenerator: undefined` and `enableJsonResponse: true`.
 
-- `onsessionclosed` for an MCP `DELETE` session close;
-- transport `onclose` for full transport shutdown;
-- Node response `close`/`finish` for standalone GET/SSE stream lifetime.
+The long-lived local Desktop Commander stdio child is still shared by all
+requests, so terminal sessions/processes started by tools remain available to
+later tool calls. Only the public HTTP protocol layer is stateless.
 
-Open SSE streams and in-flight POST/DELETE requests are protected from both
-idle cleanup and session-cap eviction. The default idle timeout is one hour and
-the default session cap is a soft cap of 64; the gateway may temporarily exceed
-that cap rather than breaking a live ChatGPT stream.
+Consequences:
 
-Tool/request responses use direct JSON mode instead of opening a short-lived
-SSE response for every POST. Standalone GET/SSE remains available for
-server-initiated notifications, but ordinary tool calls no longer create extra
-SSE response streams. This significantly reduces Cloudflare Tunnel stream churn.
+- no `Mcp-Session-Id` is issued or required;
+- there is no in-memory HTTP session map, idle reaper, or LRU eviction;
+- ordinary initialize/list/call requests return direct JSON responses;
+- GET/DELETE on `/mcp` return `405` because this gateway does not expose
+  server-initiated notifications, resumability, sampling, or elicitation;
+- ChatGPT reconnects cannot accumulate hundreds of retained MCP sessions.
 
-The local stdio MCP client also has its own request timeout. The gateway uses a
+The local stdio MCP client has its own request timeout. The gateway uses a
 120-second base timeout instead of the MCP SDK's 60-second fallback. For
 `start_process`, `read_process_output`, and `interact_with_process`, the
 gateway timeout is automatically extended to at least the tool's
 `timeout_ms + 30000`, up to 30 minutes. This prevents the proxy layer from
 timing out before the process tool's own timeout has elapsed.
 
-The health endpoint reports the live session count:
+The health endpoint reports the transport mode and number of HTTP MCP requests
+currently in flight:
 
 ```bash
 curl http://127.0.0.1:8765/health
 ```
 
-Relevant fields include `activeSessions`, `activeSseStreams`,
-`evictableSessions`, `maxSessions`, and `sessionIdleMs`.
+Relevant fields include `transportMode: "stateless-json"` and
+`activeMcpRequests`.
 
 ## Development
 
@@ -390,7 +389,8 @@ Run directly from TypeScript:
 DC_MCP_TOKEN="$(openssl rand -hex 32)" npm run dev:self-host
 ```
 
-Run the focused self-host security and OAuth integration tests:
+Run the focused self-host security, OAuth, Cloudflare-launcher, and
+stateless-transport integration tests:
 
 ```bash
 npm run test:self-host
@@ -398,6 +398,10 @@ npm run test:self-host
 
 The OAuth integration test performs a complete local DCR → authorization →
 PKCE token exchange → refresh-token rotation flow without contacting ChatGPT.
+The stateless transport integration test launches the real self-host server,
+verifies that initialize and `tools/list` work as independent POST requests
+without an `Mcp-Session-Id`, confirms JSON responses, and verifies GET
+`/mcp` is rejected with `405`.
 
 The normal stdio entrypoint remains unchanged, so upstream/local clients can
 still use:

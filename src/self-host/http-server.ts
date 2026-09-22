@@ -4,7 +4,6 @@
 import '../bootstrap.js';
 
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
@@ -25,18 +24,10 @@ import {
   SelfHostedOAuthServer,
   resolveOAuthConfig,
 } from './oauth.js';
-import {
-  isSessionEvictable,
-  isSessionIdle,
-} from './session-policy.js';
 
-type SessionContext = {
+type RequestContext = {
   server: Server;
   transport: StreamableHTTPServerTransport;
-  sessionId?: string;
-  lastActivityAt: number;
-  activeRequests: number;
-  openStreams: number;
   closing: boolean;
 };
 
@@ -51,29 +42,9 @@ const oauth =
     : null;
 const host = resolveListenHost();
 const port = resolveListenPort();
-const sessions = new Map<string, SessionContext>();
 const desktop = new DesktopCommanderIntegration();
+const activeRequests = new Set<RequestContext>();
 let shuttingDown = false;
-
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return value;
-}
-
-const sessionIdleMs = readPositiveIntEnv(
-  'DC_MCP_SESSION_IDLE_MS',
-  60 * 60 * 1000,
-);
-const maxSessions = readPositiveIntEnv('DC_MCP_MAX_SESSIONS', 64);
-const sessionSweepMs = Math.max(
-  5_000,
-  Math.min(60_000, Math.floor(sessionIdleMs / 2)),
-);
 
 function sendJson(
   res: http.ServerResponse,
@@ -142,7 +113,13 @@ function addOAuthSecurityMetadata(tool: any): any {
   };
 }
 
-async function createSessionContext(): Promise<SessionContext> {
+/**
+ * MCP SDK 1.x stateless HTTP pattern: create a fresh Server + transport for
+ * every POST request and disable protocol session IDs. The shared local
+ * Desktop Commander stdio client remains long-lived behind these lightweight
+ * request-scoped MCP server instances.
+ */
+async function createRequestContext(): Promise<RequestContext> {
   const mcpServer = new Server(
     {
       name: 'desktop-commander-self-hosted',
@@ -171,113 +148,36 @@ async function createSessionContext(): Promise<SessionContext> {
     return (await desktop.callClientTool(toolName, args)) as any;
   });
 
-  let context!: SessionContext;
   const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
+    // Explicitly disable MCP protocol sessions. ChatGPT may reconnect or send
+    // stale Mcp-Session-Id headers; stateless mode ignores them.
+    sessionIdGenerator: undefined,
+    // Ordinary initialize/list/call traffic is request/response. Avoid
+    // short-lived SSE streams through Cloudflare for every POST.
     enableJsonResponse: true,
-    onsessioninitialized: (sessionId) => {
-      context.sessionId = sessionId;
-      context.lastActivityAt = Date.now();
-      sessions.set(sessionId, context);
-      console.error(
-        `[self-host] MCP session initialized: ${sessionId} (active=${sessions.size})`,
-      );
-      void enforceSessionLimit(sessionId);
-    },
-    onsessionclosed: (sessionId) => {
-      void closeSession(context, sessionId, 'client DELETE');
-    },
   });
 
-  context = {
+  const context: RequestContext = {
     server: mcpServer,
     transport,
-    lastActivityAt: Date.now(),
-    activeRequests: 0,
-    openStreams: 0,
     closing: false,
-  };
-
-  transport.onclose = () => {
-    void closeSession(context, context.sessionId, 'transport closed');
   };
 
   await mcpServer.connect(transport);
   return context;
 }
 
-async function closeSession(
-  context: SessionContext,
-  sessionId?: string,
-  reason = 'closed',
-): Promise<void> {
+async function closeRequestContext(context: RequestContext): Promise<void> {
   if (context.closing) return;
   context.closing = true;
-
-  const resolvedSessionId =
-    sessionId ?? context.sessionId ?? context.transport.sessionId;
-  if (resolvedSessionId) {
-    sessions.delete(resolvedSessionId);
-  }
+  activeRequests.delete(context);
 
   try {
     await context.server.close();
   } catch (error) {
-    console.error('[self-host] Failed to close MCP server:', error);
-  } finally {
-    if (resolvedSessionId) {
-      console.error(
-        `[self-host] MCP session closed: ${resolvedSessionId} reason=${reason} (active=${sessions.size})`,
-      );
-    }
+    console.error('[self-host] Failed to close stateless MCP request:', error);
   }
 }
-
-async function enforceSessionLimit(excludeSessionId?: string): Promise<void> {
-  while (sessions.size > maxSessions) {
-    const candidates = [...sessions.entries()]
-      .filter(
-        ([sessionId, context]) =>
-          sessionId !== excludeSessionId &&
-          isSessionEvictable(context),
-      )
-      .sort((a, b) => a[1].lastActivityAt - b[1].lastActivityAt);
-
-    const oldest = candidates[0];
-    if (!oldest) {
-      const protectedStreams = [...sessions.values()].reduce(
-        (total, context) => total + context.openStreams,
-        0,
-      );
-      console.error(
-        `[self-host] Session soft cap exceeded (${sessions.size}/${maxSessions}); all older sessions are protected by active requests/SSE streams (openStreams=${protectedStreams})`,
-      );
-      return;
-    }
-
-    await closeSession(oldest[1], oldest[0], 'session cap eviction');
-  }
-}
-
-async function reapIdleSessions(): Promise<void> {
-  if (shuttingDown) return;
-
-  const now = Date.now();
-  const stale = [...sessions.entries()].filter(([, context]) =>
-    isSessionIdle(context, now, sessionIdleMs),
-  );
-
-  await Promise.allSettled(
-    stale.map(([sessionId, context]) =>
-      closeSession(context, sessionId, 'idle timeout'),
-    ),
-  );
-}
-
-const sessionSweepTimer = setInterval(() => {
-  void reapIdleSessions();
-}, sessionSweepMs);
-sessionSweepTimer.unref?.();
 
 async function handleMcpRequest(
   req: http.IncomingMessage,
@@ -285,89 +185,27 @@ async function handleMcpRequest(
 ): Promise<void> {
   if (!authorize(req, res)) return;
 
-  const rawSessionId = req.headers['mcp-session-id'];
-  const sessionId =
-    typeof rawSessionId === 'string'
-      ? rawSessionId
-      : Array.isArray(rawSessionId)
-        ? rawSessionId[0]
-        : undefined;
-
-  if (sessionId) {
-    const context = sessions.get(sessionId);
-    if (!context) {
-      sendMcpError(res, 404, -32001, 'MCP session not found');
-      return;
-    }
-
-    context.lastActivityAt = Date.now();
-
-    // GET is the standalone server-to-client SSE stream. Track it separately
-    // from bounded POST/DELETE requests so an actually-open stream is never
-    // selected for idle/cap eviction, while a canceled stream stops protecting
-    // the session immediately.
-    const isStreamRequest = req.method === 'GET';
-    const countsAsActiveRequest = !isStreamRequest;
-    let releaseStream: (() => void) | undefined;
-
-    if (isStreamRequest) {
-      context.openStreams += 1;
-      let released = false;
-      releaseStream = () => {
-        if (released) return;
-        released = true;
-        context.openStreams = Math.max(0, context.openStreams - 1);
-        context.lastActivityAt = Date.now();
-      };
-      res.once('close', releaseStream);
-      res.once('finish', releaseStream);
-    } else {
-      context.activeRequests += 1;
-    }
-
-    try {
-      await context.transport.handleRequest(req, res);
-    } finally {
-      if (countsAsActiveRequest) {
-        context.activeRequests = Math.max(0, context.activeRequests - 1);
-        context.lastActivityAt = Date.now();
-      } else if (res.writableEnded || res.destroyed) {
-        releaseStream?.();
-      }
-    }
-    return;
-  }
-
+  // This self-host server exposes only request/response tools. It does not use
+  // server-initiated notifications, resumability, sampling, elicitation, or
+  // any other feature that requires a standalone GET/SSE channel.
   if (req.method !== 'POST') {
+    res.setHeader('allow', 'POST');
     sendMcpError(
       res,
-      400,
+      405,
       -32000,
-      'A new MCP session must begin with a POST initialize request',
+      'Method not allowed: stateless MCP endpoint accepts POST only',
     );
     return;
   }
 
-  const context = await createSessionContext();
-  context.activeRequests += 1;
+  const context = await createRequestContext();
+  activeRequests.add(context);
+
   try {
     await context.transport.handleRequest(req, res);
-
-    // Invalid/non-initialize POSTs do not create a session. Avoid leaving a
-    // local MCP server context alive in that case.
-    if (!context.sessionId && !context.transport.sessionId) {
-      await closeSession(context, undefined, 'invalid initialize request');
-    }
-  } catch (error) {
-    await closeSession(
-      context,
-      context.sessionId ?? context.transport.sessionId,
-      'request error',
-    );
-    throw error;
   } finally {
-    context.activeRequests = Math.max(0, context.activeRequests - 1);
-    context.lastActivityAt = Date.now();
+    await closeRequestContext(context);
   }
 }
 
@@ -381,17 +219,10 @@ const httpServer = http.createServer(async (req, res) => {
         service: 'desktop-commander-self-hosted',
         version: VERSION,
         transport: 'streamable-http',
+        transportMode: 'stateless-json',
         authMode,
         oauthIssuer: oauth?.config.issuer,
-        activeSessions: sessions.size,
-        activeSseStreams: [...sessions.values()].reduce(
-          (total, context) => total + context.openStreams,
-          0,
-        ),
-        evictableSessions: [...sessions.values()].filter(isSessionEvictable)
-          .length,
-        maxSessions,
-        sessionIdleMs,
+        activeMcpRequests: activeRequests.size,
         vendorRemoteServices: false,
       });
       return;
@@ -418,27 +249,24 @@ const httpServer = http.createServer(async (req, res) => {
   }
 });
 
-// Long-lived SSE responses are expected for Streamable HTTP. Do not impose an
-// application-level response timeout; Cloudflare Tunnel owns the public edge.
+// Tool calls may intentionally run for many minutes. The local MCP proxy owns
+// per-tool timeouts, so do not impose a shorter Node HTTP response timeout.
 httpServer.requestTimeout = 0;
 
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearInterval(sessionSweepTimer);
   console.error(`[self-host] ${signal} received; shutting down...`);
 
-  // Stop accepting new requests first, then close MCP transports so any
-  // long-lived SSE responses can drain. Waiting for server.close() before
-  // closing sessions would deadlock on those open streams.
   const httpClosed = new Promise<void>((resolve) => {
     httpServer.close(() => resolve());
   });
 
-  const uniqueContexts = new Set(sessions.values());
-  sessions.clear();
+  // Close any request-scoped MCP transports still in flight before shutting
+  // down the one shared local Desktop Commander stdio child.
+  const requests = [...activeRequests];
   await Promise.allSettled(
-    [...uniqueContexts].map((context) => closeSession(context)),
+    requests.map((context) => closeRequestContext(context)),
   );
 
   try {
@@ -447,8 +275,6 @@ async function shutdown(signal: string): Promise<void> {
     console.error('[self-host] Failed to close Desktop Commander child:', error);
   }
 
-  // Node 18+ exposes closeAllConnections(). Use it as a final safety net for
-  // non-MCP keep-alive sockets after graceful transport shutdown.
   httpServer.closeAllConnections?.();
   await Promise.race([
     httpClosed,
@@ -464,9 +290,8 @@ process.once('SIGTERM', () => {
 });
 
 async function start(): Promise<void> {
-  // One local stdio child is shared by all remote HTTP sessions. This avoids a
-  // new Desktop Commander process for every reconnect while preserving MCP
-  // protocol state in a lightweight Server/transport pair per remote session.
+  // One long-lived local stdio child is shared by all independent HTTP
+  // requests. Only the public MCP transport is stateless.
   await oauth?.initialize();
   await desktop.initialize();
 
@@ -475,9 +300,7 @@ async function start(): Promise<void> {
     console.error(`[self-host] Local endpoint: http://${host}:${port}/mcp`);
     console.error(`[self-host] Health: http://${host}:${port}/health`);
     console.error(`[self-host] Authentication mode: ${authMode}`);
-    console.error(
-      `[self-host] Session policy: softMax=${maxSessions}, idle=${sessionIdleMs}ms, JSON responses enabled`,
-    );
+    console.error('[self-host] Transport mode: stateless Streamable HTTP + JSON responses');
     if (oauth) {
       console.error(`[self-host] OAuth issuer: ${oauth.config.issuer}`);
       console.error(`[self-host] OAuth resource: ${oauth.config.resource}`);
